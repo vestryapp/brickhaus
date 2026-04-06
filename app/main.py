@@ -256,16 +256,16 @@ with tab_collection:
     if sel_locs:
         filtered = [o for o in filtered if o.get("location_name") in sel_locs]
 
-    total_value = sum(o.get("estimated_value_bl") or 0 for o in filtered)
-    total_cost  = sum(o.get("total_cost_nok") or 0 for o in filtered)
-    gain = total_value - total_cost if total_value and total_cost else None
+    n_sets    = sum(1 for o in filtered if o.get("object_type") == "SET")
+    n_figs    = sum(1 for o in filtered if o.get("object_type") == "MINIFIG")
+    n_moc     = sum(1 for o in filtered if o.get("object_type") in ("MOC", "MOD"))
+    total_cost = sum(o.get("total_cost_nok") or 0 for o in filtered)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Objekter", f"{len(filtered)}")
-    c2.metric("Estimert verdi", fmt_nok(total_value))
-    c3.metric("Total kostpris", fmt_nok(total_cost))
-    c4.metric("Urealisert gevinst", fmt_nok(gain) if gain else "–",
-              delta=f"{gain/total_cost*100:.0f}%" if gain and total_cost else None)
+    c1.metric("Sett", f"{n_sets}")
+    c2.metric("Minifigurer", f"{n_figs}")
+    c3.metric("MOC / Mod", f"{n_moc}")
+    c4.metric("Total kostpris", fmt_nok(total_cost))
     st.divider()
 
     if not filtered:
@@ -297,20 +297,19 @@ with tab_register:
 
     step = st.session_state["reg_step"]
 
-    # Progress indicator
-    steps = ["Settnummer", "Detaljer", "Plassering", "Kjøp", "Lagre"]
-    cols  = st.columns(len(steps))
-    for i, (col, label) in enumerate(zip(cols, steps), start=1):
-        if i < step:
-            col.markdown(f"<div style='text-align:center;color:#2E5FA3'>✓ {label}</div>",
-                         unsafe_allow_html=True)
-        elif i == step:
-            col.markdown(f"<div style='text-align:center;font-weight:bold'>▶ {label}</div>",
-                         unsafe_allow_html=True)
-        else:
-            col.markdown(f"<div style='text-align:center;color:#aaa'>{label}</div>",
-                         unsafe_allow_html=True)
-    st.divider()
+    def _progress_indicator(step):
+        steps = ["Settnummer", "Detaljer", "Plassering", "Kjøp", "Lagre"]
+        cols  = st.columns(len(steps))
+        for i, (col, label) in enumerate(zip(cols, steps), start=1):
+            if i < step:
+                col.markdown(f"<div style='text-align:center;color:#2E5FA3'>✓ {label}</div>",
+                             unsafe_allow_html=True)
+            elif i == step:
+                col.markdown(f"<div style='text-align:center;font-weight:bold'>▶ {label}</div>",
+                             unsafe_allow_html=True)
+            else:
+                col.markdown(f"<div style='text-align:center;color:#aaa'>{label}</div>",
+                             unsafe_allow_html=True)
 
     # ── STEP 1: Set number ────────────────────────────────────────────────────
     if step == 1:
@@ -353,7 +352,7 @@ with tab_register:
             fetch_btn = st.button("🔍 Hent info fra Rebrickable", use_container_width=True,
                                   type="primary", disabled=not set_num.strip())
         with col_b:
-            skip_btn = st.button("Ingen settnummer", use_container_width=True)
+            skip_btn = st.button("MOC / løse deler", use_container_width=True)
 
         if fetch_btn and set_num.strip():
             st.session_state["rb_fetch_trigger"] = False
@@ -384,8 +383,13 @@ with tab_register:
                 st.session_state["reg_step"] = 2
                 st.rerun()
 
+        st.divider()
+        _progress_indicator(step)
+
     # ── STEP 2: Details ───────────────────────────────────────────────────────
     elif step == 2:
+        _progress_indicator(step)
+        st.divider()
         st.subheader("Detaljer")
 
         if st.session_state["rb_status"] == "found" and st.session_state["rb_img"]:
@@ -438,6 +442,8 @@ with tab_register:
 
     # ── STEP 3: Location ──────────────────────────────────────────────────────
     elif step == 3:
+        _progress_indicator(step)
+        st.divider()
         st.subheader("Plassering")
 
         loc_list_reg = fetch_locations()
@@ -468,6 +474,8 @@ with tab_register:
 
     # ── STEP 4: Purchase ──────────────────────────────────────────────────────
     elif step == 4:
+        _progress_indicator(step)
+        st.divider()
         st.subheader("Kjøpsinformasjon")
         st.caption("Alle felt er valgfrie")
 
