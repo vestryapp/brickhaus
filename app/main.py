@@ -7,12 +7,15 @@ Run:  streamlit run app/main.py
 """
 
 import os
+import io
 import json
+import base64
 from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
 import streamlit as st
+from PIL import Image, ImageDraw
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -27,7 +30,37 @@ SB_HEADERS = {
 }
 RB_HEADERS = {"Authorization": f"key {REBRICKABLE_KEY}"}
 
-st.set_page_config(page_title="BrickHaus", page_icon="🧱", layout="wide")
+
+def _make_lego_icon(size: int = 64) -> Image.Image:
+    """Generate a simple Lego brick icon (red brick, two yellow studs)."""
+    img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    RED  = (218, 41, 28)
+    DARK = (170, 25, 15)
+    m    = size // 8          # margin
+    top  = size // 3          # brick top edge
+
+    # Brick body
+    draw.rounded_rectangle([m, top, size - m, size - m],
+                            radius=size // 10, fill=RED)
+    # Studs (two circles sitting on top of the brick)
+    sr = size // 9            # stud radius
+    sy = top - sr + 2
+    for cx in [size // 3, 2 * size // 3]:
+        draw.ellipse([cx - sr, sy - sr, cx + sr, sy + sr], fill=DARK)
+        draw.ellipse([cx - sr + 2, sy - sr + 2, cx + sr - 2, sy + sr - 2], fill=RED)
+
+    return img
+
+
+@st.cache_data
+def _lego_icon_b64(size: int = 40) -> str:
+    buf = io.BytesIO()
+    _make_lego_icon(size).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+st.set_page_config(page_title="BrickHaus", page_icon=_make_lego_icon(64), layout="wide")
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
@@ -204,7 +237,12 @@ def reset_registration():
 # APP
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.title("🧱 BrickHaus")
+st.markdown(
+    f'<h1 style="display:flex;align-items:center;gap:12px">'
+    f'<img src="data:image/png;base64,{_lego_icon_b64(56)}" height="48">'
+    f'BrickHaus</h1>',
+    unsafe_allow_html=True,
+)
 
 tab_collection, tab_register = st.tabs(["📦 Samling", "➕ Registrer"])
 
