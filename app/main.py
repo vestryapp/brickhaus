@@ -345,21 +345,6 @@ with tab_collection:
     c1.metric("Antall sett", f"{n_sets}")
     c2.metric("Estimert verdi", fmt_nok(total_value) if total_value else "–")
 
-    # BrickLink debug
-    if BL_CONSUMER_KEY:
-        with st.expander("🔧 BrickLink debug"):
-            test_num = st.text_input("Testsett", value="75192")
-            if st.button("Test BrickLink API"):
-                num = test_num.split("-")[0]
-                r = requests.get(
-                    f"https://api.bricklink.com/api/store/v1/items/SET/{num}/price",
-                    auth=_bl_auth(),
-                    params={"guide_type": "sold", "new_or_used": "U",
-                            "currency_code": "NOK", "region": "europe"},
-                    timeout=10,
-                )
-                st.code(f"Status: {r.status_code}\n\n{json.dumps(r.json(), indent=2)}")
-
     # BrickLink price sync
     if BL_CONSUMER_KEY:
         missing_price = [o for o in objects
