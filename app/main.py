@@ -174,7 +174,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured"},
+            params={"select": "ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at"},
         )
         chunk = r.json()
         if not chunk:
@@ -277,6 +277,86 @@ def reset_registration():
     st.session_state["reg_step"] = 1
 
 
+# ── Edit dialog ───────────────────────────────────────────────────────────────
+
+@st.dialog("Rediger objekt", width="large")
+def edit_dialog(obj: dict, loc_list: list):
+    oid = obj.get("ownership_id", "")
+    st.caption(f"**{oid}** · Registrert: {obj.get('registered_at', '–')}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        name = st.text_input("Navn *", value=obj.get("name") or "")
+        object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
+                                   index=list(TYPE_LABEL.keys()).index(obj.get("object_type", "SET")),
+                                   format_func=lambda x: TYPE_LABEL[x])
+        theme    = st.text_input("Tema",    value=obj.get("theme") or "")
+        subtheme = st.text_input("Subtema", value=obj.get("subtheme") or "")
+        year     = st.number_input("År", min_value=1949, max_value=2030,
+                                   value=int(obj.get("year") or date.today().year), step=1)
+    with col2:
+        cond_keys = list(CONDITION_LABEL.keys())
+        cond_idx  = cond_keys.index(obj.get("condition", "SEALED")) if obj.get("condition") in cond_keys else 0
+        condition = st.selectbox("Tilstand", cond_keys,
+                                 index=cond_idx,
+                                 format_func=lambda x: CONDITION_LABEL[x])
+        loc_names   = [l["name"] for l in loc_list]
+        current_loc = obj.get("location_name") or "– Ingen –"
+        loc_options = ["– Ingen –"] + loc_names
+        loc_idx     = loc_options.index(current_loc) if current_loc in loc_options else 0
+        location    = st.selectbox("Lokasjon", loc_options, index=loc_idx)
+        new_loc     = st.text_input("Eller ny lokasjon", placeholder="f.eks. Loft")
+        sub_loc     = st.text_input("Sub-lokasjon", value=obj.get("sub_location") or "")
+        notes       = st.text_area("Notater", value=obj.get("notes") or "")
+
+    st.subheader("Kjøpsinformasjon")
+    col3, col4 = st.columns(2)
+    with col3:
+        purchase_price = st.number_input("Kjøpspris",
+                                         value=float(obj.get("purchase_price") or 0),
+                                         min_value=0.0, step=1.0)
+        currencies = ["NOK", "USD", "EUR", "GBP", "DKK", "SEK"]
+        cur = obj.get("purchase_currency") or "NOK"
+        purchase_currency = st.selectbox("Valuta", currencies,
+                                         index=currencies.index(cur) if cur in currencies else 0)
+    with col4:
+        pd_val = obj.get("purchase_date")
+        purchase_date   = st.date_input("Kjøpsdato",
+                                        value=date.fromisoformat(pd_val) if pd_val else None)
+        purchase_source = st.text_input("Kilde / selger",
+                                        value=obj.get("purchase_source") or "")
+
+    st.divider()
+    col_del, col_save = st.columns([1, 2])
+    with col_save:
+        if st.button("💾 Lagre endringer", type="primary", use_container_width=True):
+            if not name.strip():
+                st.error("Navn er påkrevd.")
+                return
+            loc_name_used = new_loc.strip() or (location if location != "– Ingen –" else None)
+            loc_id = get_or_create_location(loc_name_used) if loc_name_used else None
+            price     = float(purchase_price) if purchase_price else None
+            total_nok = price if (price and purchase_currency == "NOK") else obj.get("total_cost_nok")
+            sb_patch("objects", {"ownership_id": f"eq.{oid}"}, {
+                "name":              name.strip(),
+                "object_type":       object_type,
+                "theme":             theme.strip() or None,
+                "subtheme":          subtheme.strip() or None,
+                "year":              int(year),
+                "condition":         condition,
+                "location_id":       loc_id,
+                "sub_location":      sub_loc.strip() or None,
+                "notes":             notes.strip() or None,
+                "purchase_price":    price,
+                "purchase_currency": purchase_currency,
+                "purchase_date":     str(purchase_date) if purchase_date else None,
+                "purchase_source":   purchase_source.strip() or None,
+                "total_cost_nok":    total_nok,
+            })
+            st.cache_data.clear()
+            st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # APP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -375,6 +455,7 @@ with tab_collection:
     if not filtered:
         st.info("Ingen objekter matcher filteret.")
     else:
+        st.caption("Klikk en rad for å se detaljer og redigere.")
         rows = [{
             "ID":       o.get("ownership_id", ""),
             "Type":     TYPE_LABEL.get(o.get("object_type", ""), ""),
@@ -389,8 +470,19 @@ with tab_collection:
             "Kostpris": fmt_nok(o.get("total_cost_nok")),
             "Notater":  o.get("notes") or "",
         } for o in filtered]
-        st.dataframe(rows, use_container_width=True, height=600,
-                     column_config={"Notater": st.column_config.TextColumn(width="medium")})
+        event = st.dataframe(
+            rows,
+            use_container_width=True,
+            height=600,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={"Notater": st.column_config.TextColumn(width="medium")},
+        )
+        selected = event.selection.rows
+        if selected:
+            obj = filtered[selected[0]]
+            obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
+            edit_dialog(obj, loc_list)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
