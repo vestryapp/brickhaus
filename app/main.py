@@ -286,7 +286,10 @@ def edit_dialog(obj: dict, loc_list: list):
 
     col1, col2 = st.columns(2)
     with col1:
-        name = st.text_input("Navn *", value=obj.get("name") or "")
+        is_moc = obj.get("object_type") in ("MOC", "MOD")
+        name = st.text_input("Navn *", value=obj.get("name") or "",
+                             disabled=not is_moc,
+                             help="Navn kan kun redigeres for MOC og Mod" if not is_moc else None)
         object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
                                    index=list(TYPE_LABEL.keys()).index(obj.get("object_type", "SET")),
                                    format_func=lambda x: TYPE_LABEL[x])
@@ -337,8 +340,8 @@ def edit_dialog(obj: dict, loc_list: list):
             loc_id = get_or_create_location(loc_name_used) if loc_name_used else None
             price     = float(purchase_price) if purchase_price else None
             total_nok = price if (price and purchase_currency == "NOK") else obj.get("total_cost_nok")
-            sb_patch("objects", {"ownership_id": f"eq.{oid}"}, {
-                "name":              name.strip(),
+            updates = {
+                "name":              name.strip() if is_moc else obj.get("name"),
                 "object_type":       object_type,
                 "theme":             theme.strip() or None,
                 "subtheme":          subtheme.strip() or None,
@@ -352,7 +355,8 @@ def edit_dialog(obj: dict, loc_list: list):
                 "purchase_date":     str(purchase_date) if purchase_date else None,
                 "purchase_source":   purchase_source.strip() or None,
                 "total_cost_nok":    total_nok,
-            })
+            }
+            sb_patch("objects", {"ownership_id": f"eq.{oid}"}, updates)
             st.cache_data.clear()
             st.rerun()
 
