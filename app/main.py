@@ -338,16 +338,12 @@ with tab_collection:
     if sel_locs:
         filtered = [o for o in filtered if o.get("location_name") in sel_locs]
 
-    n_sets    = sum(1 for o in filtered if o.get("object_type") == "SET")
-    n_figs    = sum(1 for o in filtered if o.get("object_type") == "MINIFIG")
-    n_moc     = sum(1 for o in filtered if o.get("object_type") in ("MOC", "MOD"))
-    total_cost = sum(o.get("total_cost_nok") or 0 for o in filtered)
+    n_sets      = sum(1 for o in filtered if o.get("object_type") == "SET")
+    total_value = sum(o.get("estimated_value_bl") or 0 for o in filtered)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sett", f"{n_sets}")
-    c2.metric("Minifigurer", f"{n_figs}")
-    c3.metric("MOC / Mod", f"{n_moc}")
-    c4.metric("Total kostpris", fmt_nok(total_cost))
+    c1, c2 = st.columns(2)
+    c1.metric("Antall sett", f"{n_sets}")
+    c2.metric("Estimert verdi", fmt_nok(total_value) if total_value else "–")
 
     # BrickLink price sync
     if BL_CONSUMER_KEY:
