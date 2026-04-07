@@ -617,12 +617,12 @@ with tab_register:
                             st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
                             if st.button("Velg", key=f"pick_{v['set_num']}",
                                          use_container_width=True):
-                            with st.spinner("Henter detaljer ..."):
-                                data = rb_lookup(v["set_num"])
-                            if data:
-                                _apply_rb_data(data)
-                                st.session_state["reg_set_number"] = v["set_num"]
-                            st.rerun()
+                                with st.spinner("Henter detaljer ..."):
+                                    data = rb_lookup(v["set_num"])
+                                if data:
+                                    _apply_rb_data(data)
+                                    st.session_state["reg_set_number"] = v["set_num"]
+                                st.rerun()
 
         elif st.session_state["rb_status"] == "not_found":
             st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
