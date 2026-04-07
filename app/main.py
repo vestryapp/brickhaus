@@ -605,6 +605,15 @@ with tab_register:
         if st.session_state["rb_status"] == "multiple":
             variants = st.session_state["rb_variants"] or []
             st.info(f"Fant {len(variants)} varianter — velg riktig:")
+            st.markdown("""
+<style>
+div[data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+}
+div[data-testid="column"] {
+    min-width: 0 !important;
+}
+</style>""", unsafe_allow_html=True)
             cols_per_row = 4
             for row_start in range(0, len(variants), cols_per_row):
                 row_variants = variants[row_start:row_start + cols_per_row]
