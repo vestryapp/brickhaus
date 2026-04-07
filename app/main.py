@@ -607,16 +607,19 @@ with tab_register:
             st.info(f"Fant {len(variants)} varianter — velg riktig:")
             st.markdown("""
 <style>
-div[data-testid="stHorizontalBlock"] {
+.variant-row div[data-testid="stHorizontalBlock"] {
     flex-wrap: nowrap !important;
 }
-div[data-testid="column"] {
+.variant-row div[data-testid="column"] {
+    flex: 1 1 0 !important;
     min-width: 0 !important;
 }
 </style>""", unsafe_allow_html=True)
-            cols_per_row = 4
+            cols_per_row = 2
             for row_start in range(0, len(variants), cols_per_row):
                 row_variants = variants[row_start:row_start + cols_per_row]
+                with st.container():
+                    st.markdown('<div class="variant-row">', unsafe_allow_html=True)
                 cols = st.columns(cols_per_row)
                 for col, v in zip(cols, row_variants):
                     with col:
