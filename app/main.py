@@ -96,20 +96,17 @@ def sb_patch(table, filters: dict, data: dict):
     )
     r.raise_for_status()
 
-def bl_get_price(set_number: str, condition: str) -> float | None:
-    """Fetch average BrickLink price (NOK) for a set."""
-    if not BL_CONSUMER_KEY:
-        return None
-    # BrickLink expects full number incl. variant: "75192" → "75192-1"
-    num = set_number if "-" in set_number else f"{set_number}-1"
+def _bl_fetch_price(item_type: str, item_id: str,
+                    condition: str, guide_type: str) -> float | None:
+    """Single BrickLink price API call. Returns qty_avg_price or None."""
     new_or_used = "N" if condition == "SEALED" else "U"
     try:
         r = requests.get(
-            f"https://api.bricklink.com/api/store/v1/items/SET/{num}/price",
+            f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}/price",
             auth=_bl_auth(),
             params={
-                "guide_type":   "sold",
-                "new_or_used":  new_or_used,
+                "guide_type":    guide_type,
+                "new_or_used":   new_or_used,
                 "currency_code": "NOK",
                 "region":        "europe",
             },
@@ -117,11 +114,56 @@ def bl_get_price(set_number: str, condition: str) -> float | None:
         )
         if not r.ok:
             return None
-        pg = r.json().get("data", {}).get("price_detail", [])
-        avg = r.json().get("data", {}).get("avg_price")
-        return float(avg) if avg else None
+        data = r.json().get("data", {})
+        val = data.get("qty_avg_price") or data.get("avg_price")
+        return float(val) if val and float(val) > 0 else None
     except Exception:
         return None
+
+def _rb_get_bl_minifig_id(set_number: str) -> str | None:
+    """Ask Rebrickable for the BrickLink MINIFIG id of a CMF variant."""
+    try:
+        r = requests.get(
+            f"https://rebrickable.com/api/v3/lego/sets/{set_number}/",
+            headers=RB_HEADERS, timeout=8,
+        )
+        if not r.ok:
+            return None
+        for ext in r.json().get("external_ids", {}).get("BrickLink", []):
+            # BrickLink minifig IDs start with "col"
+            if str(ext).startswith("col"):
+                return str(ext)
+        return None
+    except Exception:
+        return None
+
+def bl_get_price(set_number: str, condition: str) -> float | None:
+    """
+    Fetch quantity-weighted average BrickLink price (NOK).
+    Strategy:
+      1. For CMF variants (suffix > 1): look up as MINIFIG via Rebrickable external ID
+      2. Try guide_type=sold (last 6 months actual sales)
+      3. Fall back to guide_type=stock (current listings) if no sold data
+    """
+    if not BL_CONSUMER_KEY:
+        return None
+
+    base, _, suffix = set_number.partition("-")
+    is_cmf_variant = suffix.isdigit() and int(suffix) > 1
+
+    # CMF individual figures: look up as MINIFIG on BrickLink
+    if is_cmf_variant:
+        bl_fig_id = _rb_get_bl_minifig_id(set_number)
+        if bl_fig_id:
+            price = (_bl_fetch_price("MINIFIG", bl_fig_id, condition, "sold") or
+                     _bl_fetch_price("MINIFIG", bl_fig_id, condition, "stock"))
+            if price:
+                return price
+
+    # Standard SET lookup with sold → stock fallback
+    item_id = base  # BrickLink uses base number without suffix for sets
+    return (_bl_fetch_price("SET", item_id, condition, "sold") or
+            _bl_fetch_price("SET", item_id, condition, "stock"))
 
 def rb_resolve_themes(data: dict) -> dict:
     """Resolve theme/subtheme hierarchy and add _theme_name/_subtheme_name."""
@@ -333,6 +375,14 @@ def edit_dialog(obj: dict, loc_list: list):
         sub_loc     = st.text_input("Sub-lokasjon", value=obj.get("sub_location") or "")
         notes       = st.text_area("Notater", value=obj.get("notes") or "")
 
+    st.subheader("Verdi")
+    est_value = st.number_input(
+        "Estimert verdi (NOK)",
+        value=float(obj.get("estimated_value_bl") or 0),
+        min_value=0.0, step=10.0,
+        help="Settes automatisk fra BrickLink, men kan overstyres manuelt",
+    )
+
     st.subheader("Kjøpsinformasjon")
     col3, col4 = st.columns(2)
     with col3:
@@ -374,8 +424,9 @@ def edit_dialog(obj: dict, loc_list: list):
                 "purchase_price":    price,
                 "purchase_currency": purchase_currency,
                 "purchase_date":     str(purchase_date) if purchase_date else None,
-                "purchase_source":   purchase_source.strip() or None,
-                "total_cost_nok":    total_nok,
+                "purchase_source":      purchase_source.strip() or None,
+                "total_cost_nok":       total_nok,
+                "estimated_value_bl":   float(est_value) if est_value else obj.get("estimated_value_bl"),
             }
             sb_patch("objects", {"ownership_id": f"eq.{oid}"}, updates)
             st.cache_data.clear()
@@ -457,10 +508,10 @@ with tab_collection:
                          and o.get("set_number")
                          and not o.get("estimated_value_bl")]
         if missing_price:
-            st.caption(f"💰 {len(missing_price)} sett mangler BrickLink-pris")
+            st.caption(f"⚠️ {len(missing_price)} sett mangler pris — klikk raden for å sette manuelt")
             if st.button("🔄 Hent BrickLink-priser", type="secondary"):
                 progress = st.progress(0, text="Henter priser ...")
-                updated = 0
+                updated, no_data = 0, []
                 for i, obj in enumerate(missing_price):
                     price = bl_get_price(obj["set_number"], obj.get("condition", "USED"))
                     if price:
@@ -468,11 +519,17 @@ with tab_collection:
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
                                  {"estimated_value_bl": price})
                         updated += 1
+                    else:
+                        no_data.append(f"{obj['ownership_id']} – {obj.get('name','')}")
                     progress.progress((i + 1) / len(missing_price),
                                       text=f"Hentet {i+1}/{len(missing_price)} ...")
                 progress.empty()
                 st.cache_data.clear()
                 st.success(f"✅ Oppdaterte pris for {updated} av {len(missing_price)} sett")
+                if no_data:
+                    with st.expander(f"⚠️ {len(no_data)} sett fikk ikke pris — sjekk manuelt"):
+                        for s in no_data:
+                            st.caption(s)
                 st.rerun()
 
     st.divider()
