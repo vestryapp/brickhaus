@@ -164,7 +164,10 @@ def rb_search_variants(base_num: str) -> list:
         base = base_num.split("-")[0]
         variants = [s for s in results
                     if s.get("set_num", "").split("-")[0] == base]
-        return sorted(variants, key=lambda s: s.get("set_num", ""))
+        def _variant_sort_key(s):
+            parts = s.get("set_num", "").split("-")
+            return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        return sorted(variants, key=_variant_sort_key)
     except Exception:
         return []
 
@@ -608,11 +611,12 @@ with tab_register:
                 cols = st.columns(cols_per_row)
                 for col, v in zip(cols, row_variants):
                     with col:
-                        if v.get("set_img_url"):
-                            st.image(v["set_img_url"], use_container_width=True)
-                        st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
-                        if st.button("Velg denne", key=f"pick_{v['set_num']}",
-                                     use_container_width=True):
+                        with st.container(border=True):
+                            if v.get("set_img_url"):
+                                st.image(v["set_img_url"], width=100)
+                            st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
+                            if st.button("Velg", key=f"pick_{v['set_num']}",
+                                         use_container_width=True):
                             with st.spinner("Henter detaljer ..."):
                                 data = rb_lookup(v["set_num"])
                             if data:
