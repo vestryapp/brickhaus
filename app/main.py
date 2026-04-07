@@ -123,44 +123,61 @@ def bl_get_price(set_number: str, condition: str) -> float | None:
     except Exception:
         return None
 
-def rb_lookup(set_number: str) -> dict | None:
-    num = set_number.strip()
-    if "-" not in num:
-        num = f"{num}-1"
+def rb_resolve_themes(data: dict) -> dict:
+    """Resolve theme/subtheme hierarchy and add _theme_name/_subtheme_name."""
+    theme_name, subtheme_name = "", ""
+    theme_id = data.get("theme_id")
+    if theme_id:
+        tr = requests.get(
+            f"https://rebrickable.com/api/v3/lego/themes/{theme_id}/",
+            headers=RB_HEADERS, timeout=5,
+        )
+        if tr.ok:
+            theme_data = tr.json()
+            parent_id = theme_data.get("parent_id")
+            if parent_id:
+                subtheme_name = theme_data.get("name", "")
+                pr = requests.get(
+                    f"https://rebrickable.com/api/v3/lego/themes/{parent_id}/",
+                    headers=RB_HEADERS, timeout=5,
+                )
+                if pr.ok:
+                    theme_name = pr.json().get("name", "")
+            else:
+                theme_name = theme_data.get("name", "")
+    data["_theme_name"]    = theme_name
+    data["_subtheme_name"] = subtheme_name
+    return data
+
+def rb_search_variants(base_num: str) -> list:
+    """Return all Rebrickable sets sharing the same base number (e.g. 71011)."""
     try:
         r = requests.get(
-            f"https://rebrickable.com/api/v3/lego/sets/{num}/",
+            "https://rebrickable.com/api/v3/lego/sets/",
+            headers=RB_HEADERS,
+            params={"search": base_num, "page_size": 50},
+            timeout=10,
+        )
+        if not r.ok:
+            return []
+        results = r.json().get("results", [])
+        base = base_num.split("-")[0]
+        variants = [s for s in results
+                    if s.get("set_num", "").split("-")[0] == base]
+        return sorted(variants, key=lambda s: s.get("set_num", ""))
+    except Exception:
+        return []
+
+def rb_lookup(set_number: str) -> dict | None:
+    """Fetch a single known set variant (set_number must include '-X' suffix)."""
+    try:
+        r = requests.get(
+            f"https://rebrickable.com/api/v3/lego/sets/{set_number}/",
             headers=RB_HEADERS, timeout=8,
         )
-        if r.status_code == 404:
+        if not r.ok:
             return None
-        r.raise_for_status()
-        data = r.json()
-
-        theme_name, subtheme_name = "", ""
-        theme_id = data.get("theme_id")
-        if theme_id:
-            tr = requests.get(
-                f"https://rebrickable.com/api/v3/lego/themes/{theme_id}/",
-                headers=RB_HEADERS, timeout=5,
-            )
-            if tr.ok:
-                theme_data = tr.json()
-                parent_id = theme_data.get("parent_id")
-                if parent_id:
-                    subtheme_name = theme_data.get("name", "")
-                    pr = requests.get(
-                        f"https://rebrickable.com/api/v3/lego/themes/{parent_id}/",
-                        headers=RB_HEADERS, timeout=5,
-                    )
-                    if pr.ok:
-                        theme_name = pr.json().get("name", "")
-                else:
-                    theme_name = theme_data.get("name", "")
-
-        data["_theme_name"]    = theme_name
-        data["_subtheme_name"] = subtheme_name
-        return data
+        return rb_resolve_themes(r.json())
     except Exception:
         return None
 
@@ -260,6 +277,7 @@ def init_state():
         "pending_record":   None,
         "confirm_no_loc":   False,
         "rb_fetch_trigger": False,
+        "rb_variants":      None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -269,7 +287,7 @@ init_state()
 
 def reset_registration():
     keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_status",
-            "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger"]
+            "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -515,7 +533,33 @@ with tab_register:
     if step == 1:
         st.subheader("Settnummer")
 
-        # on_change fires when Enter is pressed or field loses focus
+        def _apply_rb_data(data: dict):
+            st.session_state["rb_name"]     = data.get("name", "")
+            st.session_state["rb_theme"]    = data.get("_theme_name", "")
+            st.session_state["rb_subtheme"] = data.get("_subtheme_name", "")
+            st.session_state["rb_year"]     = data.get("year", date.today().year)
+            st.session_state["rb_img"]      = data.get("set_img_url")
+            st.session_state["rb_parts"]    = data.get("num_parts")
+            st.session_state["rb_status"]   = "found"
+            st.session_state["rb_variants"] = None
+            st.session_state["reg_step"]    = 2
+
+        def _do_rb_fetch(raw: str):
+            base = raw.strip().split("-")[0]
+            variants = rb_search_variants(base)
+            if not variants:
+                st.session_state["rb_status"]   = "not_found"
+                st.session_state["rb_variants"] = None
+            elif len(variants) == 1:
+                data = rb_lookup(variants[0]["set_num"])
+                if data:
+                    _apply_rb_data(data)
+                else:
+                    st.session_state["rb_status"] = "not_found"
+            else:
+                st.session_state["rb_status"]   = "multiple"
+                st.session_state["rb_variants"] = variants
+
         def _on_set_num_change():
             st.session_state["rb_fetch_trigger"] = True
 
@@ -527,25 +571,13 @@ with tab_register:
             on_change=_on_set_num_change,
         )
 
-        # Resolve Enter-key trigger (fires before buttons render)
+        # Enter-key trigger
         if st.session_state.get("rb_fetch_trigger") and set_num.strip():
             st.session_state["rb_fetch_trigger"] = False
             st.session_state["reg_set_number"] = set_num.strip()
             with st.spinner("Henter ..."):
-                data = rb_lookup(set_num.strip())
-            if data:
-                st.session_state["rb_name"]     = data.get("name", "")
-                st.session_state["rb_theme"]    = data.get("_theme_name", "")
-                st.session_state["rb_subtheme"] = data.get("_subtheme_name", "")
-                st.session_state["rb_year"]     = data.get("year", date.today().year)
-                st.session_state["rb_img"]      = data.get("set_img_url")
-                st.session_state["rb_parts"]    = data.get("num_parts")
-                st.session_state["rb_status"]   = "found"
-                st.session_state["reg_step"]    = 2
-                st.rerun()
-            else:
-                st.session_state["rb_status"] = "not_found"
-                st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
+                _do_rb_fetch(set_num.strip())
+            st.rerun()
 
         col_a, col_b = st.columns([3, 1])
         with col_a:
@@ -558,27 +590,38 @@ with tab_register:
             st.session_state["rb_fetch_trigger"] = False
             st.session_state["reg_set_number"] = set_num.strip()
             with st.spinner("Henter ..."):
-                data = rb_lookup(set_num.strip())
-            if data:
-                st.session_state["rb_name"]     = data.get("name", "")
-                st.session_state["rb_theme"]    = data.get("_theme_name", "")
-                st.session_state["rb_subtheme"] = data.get("_subtheme_name", "")
-                st.session_state["rb_year"]     = data.get("year", date.today().year)
-                st.session_state["rb_img"]      = data.get("set_img_url")
-                st.session_state["rb_parts"]    = data.get("num_parts")
-                st.session_state["rb_status"]   = "found"
-                st.session_state["reg_step"]    = 2
-                st.rerun()
-            else:
-                st.session_state["rb_status"] = "not_found"
-                st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
+                _do_rb_fetch(set_num.strip())
+            st.rerun()
 
         if skip_btn:
             st.session_state["reg_set_number"] = set_num.strip()
             st.session_state["reg_step"] = 2
             st.rerun()
 
-        if st.session_state["rb_status"] == "not_found":
+        # ── Variant gallery ───────────────────────────────────────────────────
+        if st.session_state["rb_status"] == "multiple":
+            variants = st.session_state["rb_variants"] or []
+            st.info(f"Fant {len(variants)} varianter — velg riktig:")
+            cols_per_row = 2
+            for row_start in range(0, len(variants), cols_per_row):
+                row_variants = variants[row_start:row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for col, v in zip(cols, row_variants):
+                    with col:
+                        if v.get("set_img_url"):
+                            st.image(v["set_img_url"], use_container_width=True)
+                        st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
+                        if st.button("Velg denne", key=f"pick_{v['set_num']}",
+                                     use_container_width=True):
+                            with st.spinner("Henter detaljer ..."):
+                                data = rb_lookup(v["set_num"])
+                            if data:
+                                _apply_rb_data(data)
+                                st.session_state["reg_set_number"] = v["set_num"]
+                            st.rerun()
+
+        elif st.session_state["rb_status"] == "not_found":
+            st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
             if st.button("Gå videre →", type="primary"):
                 st.session_state["reg_step"] = 2
                 st.rerun()
