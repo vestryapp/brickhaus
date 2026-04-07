@@ -605,7 +605,7 @@ with tab_register:
         if st.session_state["rb_status"] == "multiple":
             variants = st.session_state["rb_variants"] or []
             st.info(f"Fant {len(variants)} varianter — velg riktig:")
-            cols_per_row = 2
+            cols_per_row = 4
             for row_start in range(0, len(variants), cols_per_row):
                 row_variants = variants[row_start:row_start + cols_per_row]
                 cols = st.columns(cols_per_row)
@@ -613,7 +613,7 @@ with tab_register:
                     with col:
                         with st.container(border=True):
                             if v.get("set_img_url"):
-                                st.image(v["set_img_url"], width=100)
+                                st.image(v["set_img_url"], use_container_width=True)
                             st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
                             if st.button("Velg", key=f"pick_{v['set_num']}",
                                          use_container_width=True):
