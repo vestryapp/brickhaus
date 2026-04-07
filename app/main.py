@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
+from requests_oauthlib import OAuth1
 import streamlit as st
 from PIL import Image, ImageDraw
 
@@ -21,7 +22,14 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 SUPABASE_URL    = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY    = os.environ["SUPABASE_SERVICE_KEY"]
-REBRICKABLE_KEY = os.environ.get("REBRICKABLE_API_KEY", "")
+REBRICKABLE_KEY     = os.environ.get("REBRICKABLE_API_KEY", "")
+BL_CONSUMER_KEY     = os.environ.get("BRICKLINK_CONSUMER_KEY", "")
+BL_CONSUMER_SECRET  = os.environ.get("BRICKLINK_CONSUMER_SECRET", "")
+BL_TOKEN            = os.environ.get("BRICKLINK_TOKEN", "")
+BL_TOKEN_SECRET     = os.environ.get("BRICKLINK_TOKEN_SECRET", "")
+
+def _bl_auth():
+    return OAuth1(BL_CONSUMER_KEY, BL_CONSUMER_SECRET, BL_TOKEN, BL_TOKEN_SECRET)
 
 SB_HEADERS = {
     "apikey":        SUPABASE_KEY,
@@ -78,6 +86,42 @@ def sb_post(table, data):
     )
     r.raise_for_status()
     return r.json()
+
+def sb_patch(table, filters: dict, data: dict):
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers={**SB_HEADERS, "Prefer": "return=minimal"},
+        params=filters,
+        data=json.dumps(data, default=str),
+    )
+    r.raise_for_status()
+
+def bl_get_price(set_number: str, condition: str) -> float | None:
+    """Fetch average BrickLink price (NOK) for a set."""
+    if not BL_CONSUMER_KEY:
+        return None
+    # Strip variant suffix: "75192-1" → "75192"
+    num = set_number.split("-")[0]
+    new_or_used = "N" if condition == "SEALED" else "U"
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/items/SET/{num}/price",
+            auth=_bl_auth(),
+            params={
+                "guide_type":   "sold",
+                "new_or_used":  new_or_used,
+                "currency_code": "NOK",
+                "region":        "europe",
+            },
+            timeout=10,
+        )
+        if not r.ok:
+            return None
+        pg = r.json().get("data", {}).get("price_detail", [])
+        avg = r.json().get("data", {}).get("avg_price")
+        return float(avg) if avg else None
+    except Exception:
+        return None
 
 def rb_lookup(set_number: str) -> dict | None:
     num = set_number.strip()
@@ -304,6 +348,32 @@ with tab_collection:
     c2.metric("Minifigurer", f"{n_figs}")
     c3.metric("MOC / Mod", f"{n_moc}")
     c4.metric("Total kostpris", fmt_nok(total_cost))
+
+    # BrickLink price sync
+    if BL_CONSUMER_KEY:
+        missing_price = [o for o in objects
+                         if o.get("object_type") == "SET"
+                         and o.get("set_number")
+                         and not o.get("estimated_value_bl")]
+        if missing_price:
+            st.caption(f"💰 {len(missing_price)} sett mangler BrickLink-pris")
+            if st.button("🔄 Hent BrickLink-priser", type="secondary"):
+                progress = st.progress(0, text="Henter priser ...")
+                updated = 0
+                for i, obj in enumerate(missing_price):
+                    price = bl_get_price(obj["set_number"], obj.get("condition", "USED"))
+                    if price:
+                        sb_patch("objects",
+                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
+                                 {"estimated_value_bl": price})
+                        updated += 1
+                    progress.progress((i + 1) / len(missing_price),
+                                      text=f"Hentet {i+1}/{len(missing_price)} ...")
+                progress.empty()
+                st.cache_data.clear()
+                st.success(f"✅ Oppdaterte pris for {updated} av {len(missing_price)} sett")
+                st.rerun()
+
     st.divider()
 
     if not filtered:
