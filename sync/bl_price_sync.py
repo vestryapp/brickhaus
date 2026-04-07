@@ -59,7 +59,7 @@ def fetch_all_sets():
 
 
 def bl_get_price(set_number: str, condition: str) -> float | None:
-    num = set_number.split("-")[0]
+    num = set_number if "-" in set_number else f"{set_number}-1"
     new_or_used = "N" if condition == "SEALED" else "U"
     try:
         r = requests.get(

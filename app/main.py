@@ -100,8 +100,8 @@ def bl_get_price(set_number: str, condition: str) -> float | None:
     """Fetch average BrickLink price (NOK) for a set."""
     if not BL_CONSUMER_KEY:
         return None
-    # Strip variant suffix: "75192-1" → "75192"
-    num = set_number.split("-")[0]
+    # BrickLink expects full number incl. variant: "75192" → "75192-1"
+    num = set_number if "-" in set_number else f"{set_number}-1"
     new_or_used = "N" if condition == "SEALED" else "U"
     try:
         r = requests.get(
