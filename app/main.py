@@ -155,10 +155,10 @@ def bl_get_price(set_number: str, condition: str) -> float | None:
     if is_cmf_variant:
         bl_fig_id = _rb_get_bl_minifig_id(set_number)
         if bl_fig_id:
-            price = (_bl_fetch_price("MINIFIG", bl_fig_id, condition, "sold") or
-                     _bl_fetch_price("MINIFIG", bl_fig_id, condition, "stock"))
-            if price:
-                return price
+            return (_bl_fetch_price("MINIFIG", bl_fig_id, condition, "sold") or
+                    _bl_fetch_price("MINIFIG", bl_fig_id, condition, "stock"))
+        # No BrickLink MINIFIG id found – don't fall back to base SET price
+        return None
 
     # Standard SET lookup with sold → stock fallback
     item_id = base  # BrickLink uses base number without suffix for sets
@@ -236,7 +236,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at"},
+            params={"select": "id,ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at"},
         )
         chunk = r.json()
         if not chunk:
@@ -275,6 +275,74 @@ def get_or_create_location(name: str) -> str:
 def save_object(record: dict):
     sb_post("objects", [record])
     st.cache_data.clear()
+
+
+# ── Supabase Storage helpers ──────────────────────────────────────────────────
+
+STORAGE_BUCKET = "object-images"
+
+def image_public_url(storage_path: str) -> str:
+    return f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{storage_path}"
+
+def fetch_object_image(object_uuid: str) -> dict | None:
+    """Return the latest DOCUMENTATION image record for this object, or None."""
+    try:
+        rows = sb_get("images", {
+            "object_id": f"eq.{object_uuid}",
+            "image_type": "eq.DOCUMENTATION",
+            "select":     "id,storage_path",
+            "order":      "created_at.desc",
+            "limit":      "1",
+        })
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+def save_documentation_image(object_uuid: str, ownership_id: str,
+                              file_bytes: bytes, content_type: str) -> bool:
+    """Upload a documentation image and save the record. Returns True on success."""
+    ext = "jpg" if "jpeg" in content_type else content_type.split("/")[-1]
+    storage_path = f"{ownership_id}/doc.{ext}"
+
+    # Remove existing image (storage + db record)
+    existing = fetch_object_image(object_uuid)
+    if existing:
+        requests.delete(
+            f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{existing['storage_path']}",
+            headers={"Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=10,
+        )
+        requests.delete(
+            f"{SUPABASE_URL}/rest/v1/images",
+            headers=SB_HEADERS,
+            params={"id": f"eq.{existing['id']}"},
+        )
+
+    # Upload to Supabase Storage
+    r = requests.post(
+        f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{storage_path}",
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type":  content_type,
+            "x-upsert":      "true",
+        },
+        data=file_bytes,
+        timeout=30,
+    )
+    if not r.ok:
+        return False
+
+    # Save record in images table
+    sb_post("images", [{
+        "object_id":   object_uuid,
+        "image_type":  "DOCUMENTATION",
+        "storage_path": storage_path,
+    }])
+
+    # Promote quality_level to DOCUMENTED
+    sb_patch("objects", {"id": f"eq.{object_uuid}"}, {"quality_level": "DOCUMENTED"})
+    st.cache_data.clear()
+    return True
 
 
 # ── Display helpers ───────────────────────────────────────────────────────────
@@ -321,8 +389,11 @@ def init_state():
         "reg_set_number":   "",
         "pending_record":   None,
         "confirm_no_loc":   False,
-        "rb_fetch_trigger": False,
-        "rb_variants":      None,
+        "rb_fetch_trigger":  False,
+        "rb_variants":       None,
+        "reg_saved":         False,
+        "reg_ownership_id":  None,
+        "reg_obj_uuid":      None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -332,7 +403,8 @@ init_state()
 
 def reset_registration():
     keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_status",
-            "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants"]
+            "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants",
+            "reg_saved","reg_ownership_id","reg_obj_uuid"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -374,6 +446,31 @@ def edit_dialog(obj: dict, loc_list: list):
         new_loc     = st.text_input("Eller ny lokasjon", placeholder="f.eks. Loft")
         sub_loc     = st.text_input("Sub-lokasjon", value=obj.get("sub_location") or "")
         notes       = st.text_area("Notater", value=obj.get("notes") or "")
+
+    # ── Documentation image ───────────────────────────────────────────────────
+    st.subheader("📷 Dokumentasjonsbilde")
+    obj_uuid = obj.get("id")
+    if obj_uuid:
+        existing_img = fetch_object_image(obj_uuid)
+        if existing_img:
+            st.image(image_public_url(existing_img["storage_path"]), width=280)
+            st.caption(f"🔵 Documented")
+        else:
+            st.caption("Ingen bilde lastet opp ennå — ⚪ Basic")
+        new_img = st.file_uploader(
+            "Last opp bilde (erstatter eventuelt eksisterende)",
+            type=["jpg", "jpeg", "png", "webp"],
+            key=f"edit_img_{oid}",
+        )
+        if new_img:
+            if st.button("⬆️ Lagre bilde", key=f"save_img_{oid}", use_container_width=True):
+                with st.spinner("Laster opp ..."):
+                    ok = save_documentation_image(obj_uuid, oid, new_img.read(), new_img.type)
+                if ok:
+                    st.success("📷 Bilde lagret — 🔵 Documented!")
+                    st.rerun()
+                else:
+                    st.error("Opplasting feilet. Sjekk at storage-bucket er opprettet i Supabase.")
 
     st.subheader("Verdi")
     est_value = st.number_input(
@@ -504,7 +601,7 @@ with tab_collection:
     # BrickLink price sync
     if BL_CONSUMER_KEY:
         missing_price = [o for o in objects
-                         if o.get("object_type") == "SET"
+                         if o.get("object_type") in ("SET", "MINIFIG")
                          and o.get("set_number")
                          and not o.get("estimated_value_bl")]
         if missing_price:
@@ -815,32 +912,66 @@ with tab_register:
                 st.session_state["reg_step"] = 5
                 st.rerun()
 
-    # ── STEP 5: Save ─────────────────────────────────────────────────────────
+    # ── STEP 5: Save + optional image ────────────────────────────────────────
     elif step == 5:
-        rec = st.session_state["pending_record"].copy()
+        # Guard: only save once even if Streamlit reruns (e.g. during image upload)
+        if not st.session_state.get("reg_saved"):
+            rec = st.session_state["pending_record"].copy()
+            with st.spinner("Lagrer ..."):
+                loc_name = rec.pop("_loc_name", None)
+                loc_id   = get_or_create_location(loc_name) if loc_name else None
 
-        with st.spinner("Lagrer ..."):
-            loc_name = rec.pop("_loc_name", None)
-            loc_id   = get_or_create_location(loc_name) if loc_name else None
+                bl_price = None
+                if rec.get("set_number") and rec.get("object_type") in ("SET", "MINIFIG"):
+                    bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"))
 
-            # Fetch BrickLink price silently if we have a set number
-            bl_price = None
-            if rec.get("set_number") and rec.get("object_type") == "SET":
-                bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"))
+                ownership_id = next_ownership_id()
+                record = {
+                    **rec,
+                    "ownership_id":       ownership_id,
+                    "status":             "OWNED",
+                    "location_id":        loc_id,
+                    "registered_at":      str(date.today()),
+                    "quality_level":      "BASIC",
+                    "estimated_value_bl": bl_price,
+                }
+                save_object(record)
 
-            ownership_id = next_ownership_id()
-            record = {
-                **rec,
-                "ownership_id":       ownership_id,
-                "status":             "OWNED",
-                "location_id":        loc_id,
-                "registered_at":      str(date.today()),
-                "quality_level":      "BASIC",
-                "estimated_value_bl": bl_price,
-            }
-            save_object(record)
+                # Fetch UUID for image linking
+                try:
+                    uuid_rows = sb_get("objects", {"ownership_id": f"eq.{ownership_id}", "select": "id"})
+                    obj_uuid  = uuid_rows[0]["id"] if uuid_rows else None
+                except Exception:
+                    obj_uuid = None
 
-        st.success(f"✅ **{rec['name']}** lagret som **{ownership_id}**")
+                st.session_state["reg_saved"]       = True
+                st.session_state["reg_ownership_id"] = ownership_id
+                st.session_state["reg_obj_uuid"]     = obj_uuid
+
+        ownership_id = st.session_state.get("reg_ownership_id", "")
+        obj_uuid     = st.session_state.get("reg_obj_uuid")
+        saved_name   = st.session_state["pending_record"].get("name", "")
+
+        st.success(f"✅ **{saved_name}** lagret som **{ownership_id}**")
+
+        # Optional documentation image
+        st.subheader("📷 Legg til bilde (valgfri)")
+        st.caption("Laster du opp et bilde, oppgraderes kvalitetsnivået til 🔵 Documented automatisk.")
+        img_file = st.file_uploader(
+            "Velg bilde",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="reg_img_upload",
+            label_visibility="collapsed",
+        )
+        if img_file and obj_uuid:
+            if st.button("⬆️ Last opp bilde", use_container_width=True):
+                with st.spinner("Laster opp ..."):
+                    ok = save_documentation_image(obj_uuid, ownership_id,
+                                                  img_file.read(), img_file.type)
+                if ok:
+                    st.success("📷 Bilde lagret — 🔵 Documented!")
+                else:
+                    st.error("Opplasting feilet. Sjekk at storage-bucket er opprettet i Supabase.")
 
         if st.button("➕ Registrer et til", type="primary", use_container_width=True):
             reset_registration()
