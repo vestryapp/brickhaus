@@ -345,6 +345,21 @@ with tab_collection:
     c1.metric("Antall sett", f"{n_sets}")
     c2.metric("Estimert verdi", fmt_nok(total_value) if total_value else "–")
 
+    # BrickLink debug
+    if BL_CONSUMER_KEY:
+        with st.expander("🔧 BrickLink debug"):
+            test_num = st.text_input("Testsett", value="75192")
+            if st.button("Test BrickLink API"):
+                num = test_num.split("-")[0]
+                r = requests.get(
+                    f"https://api.bricklink.com/api/store/v1/items/SET/{num}/price",
+                    auth=_bl_auth(),
+                    params={"guide_type": "sold", "new_or_used": "U",
+                            "currency_code": "NOK", "region": "europe"},
+                    timeout=10,
+                )
+                st.code(f"Status: {r.status_code}\n\n{json.dumps(r.json(), indent=2)}")
+
     # BrickLink price sync
     if BL_CONSUMER_KEY:
         missing_price = [o for o in objects
@@ -623,14 +638,20 @@ with tab_register:
             loc_name = rec.pop("_loc_name", None)
             loc_id   = get_or_create_location(loc_name) if loc_name else None
 
+            # Fetch BrickLink price silently if we have a set number
+            bl_price = None
+            if rec.get("set_number") and rec.get("object_type") == "SET":
+                bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"))
+
             ownership_id = next_ownership_id()
             record = {
                 **rec,
-                "ownership_id":  ownership_id,
-                "status":        "OWNED",
-                "location_id":   loc_id,
-                "registered_at": str(date.today()),
-                "quality_level": "BASIC",
+                "ownership_id":       ownership_id,
+                "status":             "OWNED",
+                "location_id":        loc_id,
+                "registered_at":      str(date.today()),
+                "quality_level":      "BASIC",
+                "estimated_value_bl": bl_price,
             }
             save_object(record)
 
