@@ -809,16 +809,17 @@ with tab_collection:
 
     # BrickLink price sync
     if BL_CONSUMER_KEY:
-        missing_price = [o for o in objects
-                         if o.get("object_type") in ("SET", "MINIFIG")
-                         and o.get("set_number")
-                         and not o.get("estimated_value_bl")]
-        if missing_price:
-            st.caption(f"⚠️ {len(missing_price)} sett mangler pris — klikk raden for å sette manuelt")
-            if st.button("🔄 Hent BrickLink-priser", type="secondary"):
-                progress = st.progress(0, text="Henter priser ...")
+        syncable = [o for o in objects
+                    if o.get("object_type") in ("SET", "MINIFIG")
+                    and o.get("set_number")]
+        missing_count = sum(1 for o in syncable if not o.get("estimated_value_bl"))
+        if syncable:
+            if missing_count:
+                st.caption(f"⚠️ {missing_count} sett mangler pris — klikk raden for å sette manuelt, eller synkroniser alle")
+            if st.button("🔄 Synkroniser BrickLink-priser", type="secondary"):
+                progress = st.progress(0, text="Synkroniserer priser ...")
                 updated, no_data = 0, []
-                for i, obj in enumerate(missing_price):
+                for i, obj in enumerate(syncable):
                     price = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"))
                     if price:
                         sb_patch("objects",
@@ -827,11 +828,11 @@ with tab_collection:
                         updated += 1
                     else:
                         no_data.append(f"{obj['ownership_id']} – {obj.get('name','')}")
-                    progress.progress((i + 1) / len(missing_price),
-                                      text=f"Hentet {i+1}/{len(missing_price)} ...")
+                    progress.progress((i + 1) / len(syncable),
+                                      text=f"Synkroniserer {i+1}/{len(syncable)} ...")
                 progress.empty()
                 st.cache_data.clear()
-                st.success(f"✅ Oppdaterte pris for {updated} av {len(missing_price)} sett")
+                st.success(f"✅ Synkroniserte pris for {updated} av {len(syncable)} sett")
                 if no_data:
                     with st.expander(f"⚠️ {len(no_data)} sett fikk ikke pris — sjekk manuelt"):
                         for s in no_data:
