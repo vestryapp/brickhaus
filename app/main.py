@@ -261,6 +261,8 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> f
     is_cmf_variant = suffix.isdigit() and int(suffix) > 1
 
     # ── MINIFIG / CMF path ────────────────────────────────────────────────────
+    # CMF variants (suffix > 1) must be priced as MINIFIG via Rebrickable BL ID.
+    # Do NOT fall through to SET price — that would return the full series price.
     if object_type == "MINIFIG" or is_cmf_variant:
         bl_fig_id = _rb_get_bl_minifig_id(set_number)
         if bl_fig_id:
@@ -270,9 +272,7 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> f
             )
             if price:
                 return price
-        # Explicit MINIFIG type: don't fall through to SET lookup
-        if object_type == "MINIFIG":
-            return None
+        return None  # No BL MINIFIG ID found — better no price than wrong price
 
     # ── SET path ──────────────────────────────────────────────────────────────
     # Try base number first (BrickLink standard), then with "-1" suffix.
@@ -284,17 +284,6 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> f
         )
         if price:
             return price
-
-    # Condition fallback: SEALED items may only have "used" listings on BrickLink
-    # (common for CMF sealed bags and older sets where "new" guide has no entries).
-    if condition == "SEALED":
-        for item_id in (base, f"{base}-1"):
-            price = _weighted_price(
-                _bl_fetch_raw("SET", item_id, "USED", "sold"),
-                _bl_fetch_raw("SET", item_id, "USED", "stock"),
-            )
-            if price:
-                return price
 
     # ── GEAR fallback (keychains, accessories, GWP items) ────────────────────
     return _weighted_price(
