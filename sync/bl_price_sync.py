@@ -160,17 +160,24 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> f
     # ── SET path ──────────────────────────────────────────────────────────────
     # Try base number first (BrickLink standard), then with "-1" suffix.
     # Some sets (polybags, older sets) are only found with the revision suffix.
-    price = _weighted_price(
-        _fetch_raw("SET", base, condition, "sold"),
-        _fetch_raw("SET", base, condition, "stock"),
-    )
-    if not price:
+    for item_id in (base, f"{base}-1"):
         price = _weighted_price(
-            _fetch_raw("SET", f"{base}-1", condition, "sold"),
-            _fetch_raw("SET", f"{base}-1", condition, "stock"),
+            _fetch_raw("SET", item_id, condition, "sold"),
+            _fetch_raw("SET", item_id, condition, "stock"),
         )
-    if price:
-        return price
+        if price:
+            return price
+
+    # Condition fallback: SEALED items may only have "used" listings on BrickLink
+    # (common for CMF sealed bags and older sets where "new" guide has no entries).
+    if condition == "SEALED":
+        for item_id in (base, f"{base}-1"):
+            price = _weighted_price(
+                _fetch_raw("SET", item_id, "USED", "sold"),
+                _fetch_raw("SET", item_id, "USED", "stock"),
+            )
+            if price:
+                return price
 
     # ── GEAR fallback (keychains, accessories, GWP items) ────────────────────
     return _weighted_price(
