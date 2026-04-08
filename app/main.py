@@ -303,6 +303,21 @@ def rb_lookup(set_number: str) -> dict | None:
     except Exception:
         return None
 
+def rb_search_mocs(query: str) -> list:
+    """Search Rebrickable community MOCs by name or MOC ID."""
+    try:
+        r = requests.get(
+            "https://rebrickable.com/api/v3/lego/mocs/",
+            headers=RB_HEADERS,
+            params={"search": query, "page_size": 12},
+            timeout=10,
+        )
+        if not r.ok:
+            return []
+        return r.json().get("results", [])
+    except Exception:
+        return []
+
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
@@ -313,7 +328,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "id,ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at"},
+            params={"select": "id,ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
         )
         chunk = r.json()
         if not chunk:
@@ -374,6 +389,26 @@ def fetch_object_image(object_uuid: str) -> dict | None:
         return rows[0] if rows else None
     except Exception:
         return None
+
+def upload_instructions_file(ownership_id: str, file_bytes: bytes, content_type: str) -> str | None:
+    """Upload a MOC instructions file to Storage. Returns storage_path or None on failure."""
+    ext = content_type.split("/")[-1].replace("jpeg", "jpg")
+    storage_path = f"{ownership_id}/instructions.{ext}"
+    r = requests.post(
+        f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{storage_path}",
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type":  content_type,
+            "x-upsert":      "true",
+        },
+        data=file_bytes,
+        timeout=30,
+    )
+    return storage_path if r.ok else None
+
+def instructions_public_url(storage_path: str) -> str:
+    return image_public_url(storage_path)  # same bucket
+
 
 def save_documentation_image(object_uuid: str, ownership_id: str,
                               file_bytes: bytes, content_type: str) -> bool:
@@ -473,6 +508,8 @@ def init_state():
         "reg_obj_uuid":      None,
         "reg_input_mode":    None,
         "reg_ai_result":     None,
+        "moc_prefill":       None,
+        "moc_rb_results":    None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -484,7 +521,7 @@ def reset_registration():
     keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_status",
             "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants",
             "reg_saved","reg_ownership_id","reg_obj_uuid",
-            "reg_input_mode","reg_ai_result"]
+            "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -560,6 +597,51 @@ def edit_dialog(obj: dict, loc_list: list):
         help="Settes automatisk fra BrickLink, men kan overstyres manuelt",
     )
 
+    # ── MOC / MOD-spesifikke felt ─────────────────────────────────────────────
+    if obj.get("object_type") in ("MOC", "MOD"):
+        st.subheader("🔧 MOC / MOD")
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            num_parts = st.number_input(
+                "Antall deler",
+                min_value=0, step=10,
+                value=int(obj.get("num_parts") or 0),
+            )
+            moc_base_set = st.text_input(
+                "Basert på sett (kun MOD)",
+                value=obj.get("moc_base_set") or "",
+                placeholder="f.eks. 75192-1",
+                disabled=obj.get("object_type") != "MOD",
+            )
+        with col_m2:
+            rebrickable_moc_id = st.text_input(
+                "Rebrickable MOC-ID",
+                value=obj.get("rebrickable_moc_id") or "",
+                placeholder="f.eks. MOC-12345",
+            )
+            instructions_url = st.text_input(
+                "Instruksjonslenke",
+                value=obj.get("instructions_url") or "",
+                placeholder="https://rebrickable.com/mocs/...",
+            )
+
+        # Show existing instruction file or upload new
+        existing_instr = obj.get("instructions_storage_path")
+        if existing_instr:
+            st.caption(f"📐 Instruksjonsfil: [{existing_instr.split('/')[-1]}]"
+                       f"({instructions_public_url(existing_instr)})")
+        new_instr_file = st.file_uploader(
+            "Last opp instruksjonsfil (erstatter eventuelt eksisterende)",
+            type=["pdf","jpg","jpeg","png"],
+            key=f"edit_instr_{oid}",
+        )
+    else:
+        num_parts = obj.get("num_parts")
+        moc_base_set = obj.get("moc_base_set")
+        rebrickable_moc_id = obj.get("rebrickable_moc_id")
+        instructions_url = obj.get("instructions_url")
+        new_instr_file = None
+
     st.subheader("Kjøpsinformasjon")
     col3, col4 = st.columns(2)
     with col3:
@@ -604,8 +686,20 @@ def edit_dialog(obj: dict, loc_list: list):
                 "purchase_source":      purchase_source.strip() or None,
                 "total_cost_nok":       total_nok,
                 "estimated_value_bl":   float(est_value) if est_value else obj.get("estimated_value_bl"),
+                "num_parts":            int(num_parts) if num_parts else None,
+                "moc_base_set":         moc_base_set.strip() if moc_base_set else None,
+                "rebrickable_moc_id":   rebrickable_moc_id.strip() if rebrickable_moc_id else None,
+                "instructions_url":     instructions_url.strip() if instructions_url else None,
             }
             sb_patch("objects", {"ownership_id": f"eq.{oid}"}, updates)
+
+            # Upload new instruction file if provided
+            if new_instr_file:
+                path = upload_instructions_file(oid, new_instr_file.read(), new_instr_file.type)
+                if path:
+                    sb_patch("objects", {"ownership_id": f"eq.{oid}"},
+                             {"instructions_storage_path": path})
+
             st.cache_data.clear()
             st.rerun()
 
@@ -801,23 +895,23 @@ with tab_register:
         # ── Mode selector ─────────────────────────────────────────────────────
         if input_mode is None:
             st.subheader("Registrer nytt objekt")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
-                if st.button("📷  Start med bilde", use_container_width=True,
+                if st.button("📷  Bilde", use_container_width=True,
                              type="primary", disabled=not ANTHROPIC_API_KEY):
                     st.session_state["reg_input_mode"] = "image"
                     st.rerun()
-                if not ANTHROPIC_API_KEY:
-                    st.caption("(krever ANTHROPIC_API_KEY)")
+                st.caption("Gjenkjenn fra foto" if ANTHROPIC_API_KEY else "Krever ANTHROPIC_API_KEY")
             with c2:
-                if st.button("🔢  Skriv inn settnummer", use_container_width=True,
-                             type="primary"):
+                if st.button("🔢  Settnummer", use_container_width=True, type="primary"):
                     st.session_state["reg_input_mode"] = "number"
                     st.rerun()
-            st.divider()
-            if st.button("MOC / løse deler →", use_container_width=True):
-                st.session_state["reg_step"] = 2
-                st.rerun()
+                st.caption("Offisielle sett og CMF")
+            with c3:
+                if st.button("🔧  MOC / MOD", use_container_width=True, type="primary"):
+                    st.session_state["reg_input_mode"] = "moc"
+                    st.rerun()
+                st.caption("Egne bygg og modifikasjoner")
             st.divider()
             _progress_indicator(step)
 
@@ -953,6 +1047,124 @@ with tab_register:
             st.divider()
             _progress_indicator(step)
 
+        # ── MOC / MOD path ────────────────────────────────────────────────────
+        elif input_mode == "moc":
+            st.subheader("🔧 MOC / MOD")
+
+            moc_type = st.radio("Type bygg", ["MOC – eget bygg", "MOD – modifisert sett"],
+                                horizontal=True, key="moc_type_radio")
+            is_mod = moc_type.startswith("MOD")
+
+            st.divider()
+
+            # Rebrickable MOC-søk (valgfritt)
+            with st.expander("🔍 Finn i Rebrickable MOC-katalog (valgfritt)"):
+                moc_query = st.text_input("Søk etter MOC-navn eller MOC-ID",
+                                          placeholder="f.eks. 'Sopwith Camel' eller 'MOC-12345'",
+                                          key="moc_rb_query")
+                if st.button("Søk", key="moc_rb_search", disabled=not moc_query.strip()):
+                    with st.spinner("Søker i Rebrickable ..."):
+                        results = rb_search_mocs(moc_query.strip())
+                    st.session_state["moc_rb_results"] = results
+                    st.rerun()
+
+                rb_results = st.session_state.get("moc_rb_results", [])
+                if rb_results:
+                    st.caption(f"Fant {len(rb_results)} treff:")
+                    for m in rb_results[:6]:
+                        col_img, col_info, col_btn = st.columns([1, 4, 1])
+                        with col_img:
+                            if m.get("moc_img_url"):
+                                st.image(m["moc_img_url"], width=60)
+                        with col_info:
+                            st.markdown(f"**{m.get('name','')}**  \n"
+                                        f"{m.get('moc_id','')} · {m.get('num_parts','')} deler")
+                        with col_btn:
+                            if st.button("Velg", key=f"moc_pick_{m.get('moc_id','')}",
+                                         use_container_width=True):
+                                st.session_state["moc_prefill"] = m
+                                st.session_state["moc_rb_results"] = []
+                                st.rerun()
+                elif st.session_state.get("moc_rb_results") is not None and moc_query:
+                    st.caption("Ingen treff — fyll inn manuelt nedenfor.")
+
+            # Prefill from Rebrickable result
+            prefill = st.session_state.get("moc_prefill") or {}
+
+            name = st.text_input("Navn *",
+                                 value=prefill.get("name", ""),
+                                 placeholder="f.eks. Sopwith Camel 1:24")
+            if is_mod:
+                base_set = st.text_input("Basert på sett",
+                                         placeholder="f.eks. 75192-1",
+                                         help="Settnummeret til originalsettet som er modifisert")
+            else:
+                base_set = None
+
+            col1, col2 = st.columns(2)
+            with col1:
+                theme   = st.text_input("Tema", value=prefill.get("theme","") or "")
+                year    = st.number_input("År bygget", min_value=1949, max_value=2030,
+                                          value=date.today().year, step=1)
+                num_parts = st.number_input(
+                    "Antall deler (estimat)",
+                    min_value=0, step=10,
+                    value=int(prefill.get("num_parts") or 0),
+                    help="Kan oppdateres senere",
+                )
+            with col2:
+                condition = st.selectbox("Tilstand",
+                                         list(CONDITION_LABEL.keys()),
+                                         index=list(CONDITION_LABEL.keys()).index("BUILT"),
+                                         format_func=lambda x: CONDITION_LABEL[x])
+                notes = st.text_area("Notater", placeholder="Fri tekst ...")
+
+            # Instructions
+            st.subheader("📐 Instruksjoner")
+            instructions_url = st.text_input(
+                "Lenke til instruksjoner",
+                value=prefill.get("rebrickable_moc_url","") or "",
+                placeholder="f.eks. https://rebrickable.com/mocs/MOC-12345/",
+            )
+            instructions_file = st.file_uploader(
+                "Last opp instruksjonsfil (PDF, bilde)",
+                type=["pdf","jpg","jpeg","png"],
+                key="moc_instr_file",
+            )
+
+            moc_id = prefill.get("moc_id","") or ""
+
+            col_back, col_next = st.columns(2)
+            with col_back:
+                if st.button("← Tilbake", use_container_width=True):
+                    st.session_state["reg_input_mode"] = None
+                    st.session_state["moc_prefill"]    = None
+                    st.session_state["moc_rb_results"] = None
+                    st.rerun()
+            with col_next:
+                if st.button("Neste →", use_container_width=True, type="primary"):
+                    if not name.strip():
+                        st.error("Navn er påkrevd.")
+                    else:
+                        obj_type = "MOD" if is_mod else "MOC"
+                        st.session_state["pending_record"] = {
+                            "object_type":       obj_type,
+                            "set_number":        None,
+                            "name":              name.strip(),
+                            "theme":             theme.strip() or None,
+                            "subtheme":          None,
+                            "year":              int(year),
+                            "condition":         condition,
+                            "notes":             notes.strip() or None,
+                            "num_parts":         int(num_parts) if num_parts else None,
+                            "moc_base_set":      base_set.strip() if base_set else None,
+                            "instructions_url":  instructions_url.strip() or None,
+                            "rebrickable_moc_id": moc_id or None,
+                            "_moc_instr_file":   instructions_file,
+                        }
+                        st.session_state["reg_step"] = 3
+                        st.rerun()
+
     # ── STEP 2: Details ───────────────────────────────────────────────────────
     elif step == 2:
         _progress_indicator(step)
@@ -1084,8 +1296,9 @@ with tab_register:
         if not st.session_state.get("reg_saved"):
             rec = st.session_state["pending_record"].copy()
             with st.spinner("Lagrer ..."):
-                loc_name = rec.pop("_loc_name", None)
-                loc_id   = get_or_create_location(loc_name) if loc_name else None
+                loc_name      = rec.pop("_loc_name", None)
+                instr_file    = rec.pop("_moc_instr_file", None)
+                loc_id        = get_or_create_location(loc_name) if loc_name else None
 
                 bl_price = None
                 if rec.get("set_number") and rec.get("object_type") in ("SET", "MINIFIG"):
@@ -1102,6 +1315,15 @@ with tab_register:
                     "estimated_value_bl": bl_price,
                 }
                 save_object(record)
+
+                # Upload instruction file for MOC/MOD if provided
+                if instr_file:
+                    path = upload_instructions_file(
+                        ownership_id, instr_file.read(), instr_file.type)
+                    if path:
+                        sb_patch("objects",
+                                 {"ownership_id": f"eq.{ownership_id}"},
+                                 {"instructions_storage_path": path})
 
                 # Fetch UUID for image linking
                 try:
