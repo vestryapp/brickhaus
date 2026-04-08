@@ -118,13 +118,40 @@ def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
 
 
 def _rb_bl_minifig_id(set_number: str) -> str | None:
-    """Ask Rebrickable for the BrickLink MINIFIG id of a CMF variant."""
+    """
+    Find the BrickLink MINIFIG id (col*) for a CMF individual figure.
+
+    Strategy:
+      1. Check set's own external_ids.BrickLink (works for older CMF series)
+      2. If empty: fetch the single minifig inside the set, then look up that
+         minifig's external_ids — Rebrickable stores col* IDs on the minifig
+         record, not always on the set record (common for series 71011+)
+    """
     try:
         r = requests.get(f"https://rebrickable.com/api/v3/lego/sets/{set_number}/",
                          headers=RB_HEADERS, timeout=8)
         if not r.ok:
             return None
         for ext in r.json().get("external_ids", {}).get("BrickLink", []):
+            if str(ext).startswith("col"):
+                return str(ext)
+
+        # Follow set → minifig → minifig external IDs
+        r2 = requests.get(f"https://rebrickable.com/api/v3/lego/sets/{set_number}/minifigs/",
+                          headers=RB_HEADERS, timeout=8)
+        if not r2.ok:
+            return None
+        figs = r2.json().get("results", [])
+        if len(figs) != 1:
+            return None
+        fig_num = figs[0].get("fig_num")
+        if not fig_num:
+            return None
+        r3 = requests.get(f"https://rebrickable.com/api/v3/lego/minifigs/{fig_num}/",
+                          headers=RB_HEADERS, timeout=8)
+        if not r3.ok:
+            return None
+        for ext in r3.json().get("external_ids", {}).get("BrickLink", []):
             if str(ext).startswith("col"):
                 return str(ext)
         return None
