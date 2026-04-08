@@ -34,23 +34,38 @@ def _bl_auth():
     return OAuth1(BL_CONSUMER_KEY, BL_CONSUMER_SECRET, BL_TOKEN, BL_TOKEN_SECRET)
 
 
+_MAX_IMG_PX = 1024  # resize long edge to this before sending — reduces image tokens ~4–16×
+
+def _resize_image(image_bytes: bytes, content_type: str) -> tuple[bytes, str]:
+    """Resize image so its longest side is at most _MAX_IMG_PX. Returns (bytes, media_type)."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.thumbnail((_MAX_IMG_PX, _MAX_IMG_PX), Image.LANCZOS)
+        buf = io.BytesIO()
+        fmt = "JPEG" if "jpeg" in content_type or "jpg" in content_type else "PNG"
+        img.convert("RGB").save(buf, format=fmt, quality=85)
+        return buf.getvalue(), f"image/{fmt.lower()}"
+    except Exception:
+        return image_bytes, content_type
+
+
 def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
     """
-    Use Claude Vision to identify a Lego set from an image (box or built set).
+    Use Claude Vision (Haiku) to identify a Lego set from an image (box or built set).
+    Image is resized before sending to minimise token cost.
     Returns: {"set_number": str|None, "name": str|None, "confidence": "high"|"medium"|"low", "note": str}
     """
     if not ANTHROPIC_API_KEY:
         return {"set_number": None, "name": None, "confidence": "low",
                 "note": "ANTHROPIC_API_KEY ikke satt."}
     try:
-        img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        media_type = content_type if content_type in (
-            "image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
+        small_bytes, media_type = _resize_image(image_bytes, content_type)
+        img_b64 = base64.standard_b64encode(small_bytes).decode("utf-8")
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=256,
+            model="claude-haiku-4-5-20251001",  # Haiku: ~12× billigere enn Sonnet, tilstrekkelig for settgjenkjenning
+            max_tokens=128,                      # Vi trenger bare et lite JSON-svar
             messages=[{
                 "role": "user",
                 "content": [
