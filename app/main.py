@@ -173,9 +173,9 @@ def sb_patch(table, filters: dict, data: dict):
     )
     r.raise_for_status()
 
-def _bl_fetch_price(item_type: str, item_id: str,
-                    condition: str, guide_type: str) -> float | None:
-    """Single BrickLink price API call. Returns qty_avg_price or None."""
+def _bl_fetch_raw(item_type: str, item_id: str,
+                  condition: str, guide_type: str) -> dict | None:
+    """Single BrickLink price API call. Returns raw data dict or None."""
     new_or_used = "N" if condition == "SEALED" else "U"
     try:
         r = requests.get(
@@ -191,11 +191,30 @@ def _bl_fetch_price(item_type: str, item_id: str,
         )
         if not r.ok:
             return None
-        data = r.json().get("data", {})
-        val = data.get("qty_avg_price") or data.get("avg_price")
-        return float(val) if val and float(val) > 0 else None
+        return r.json().get("data") or None
     except Exception:
         return None
+
+def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
+    """
+    Quantity-weighted average across sold (last 6 months) and stock (current listings).
+    Prevents single high-priced outlier sales from dominating when few transactions exist.
+    Example: 2 sold @ 4000 + 20 in stock @ 200 → (8000+4000)/22 = 545 NOK (not 1918).
+    """
+    def extract(d: dict | None) -> tuple[float, int]:
+        if not d:
+            return 0.0, 0
+        qty = int(d.get("total_quantity") or 0)
+        avg = float(d.get("qty_avg_price") or d.get("avg_price") or 0)
+        return avg, qty
+
+    sold_avg,  sold_qty  = extract(sold)
+    stock_avg, stock_qty = extract(stock)
+    total = sold_qty + stock_qty
+    if total == 0 or (sold_avg == 0 and stock_avg == 0):
+        return None
+    weighted = (sold_avg * sold_qty + stock_avg * stock_qty) / total
+    return round(weighted, 2) if weighted > 0 else None
 
 def _rb_get_bl_minifig_id(set_number: str) -> str | None:
     """Ask Rebrickable for the BrickLink MINIFIG id of a CMF variant."""
@@ -214,13 +233,15 @@ def _rb_get_bl_minifig_id(set_number: str) -> str | None:
     except Exception:
         return None
 
-def bl_get_price(set_number: str, condition: str) -> float | None:
+def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> float | None:
     """
-    Fetch quantity-weighted average BrickLink price (NOK).
-    Strategy:
-      1. For CMF variants (suffix > 1): look up as MINIFIG via Rebrickable external ID
-      2. Try guide_type=sold (last 6 months actual sales)
-      3. Fall back to guide_type=stock (current listings) if no sold data
+    Fetch BrickLink price (NOK) using a quantity-weighted average of sold + stock data.
+    This prevents outlier sales (e.g. one sale at 4× market price) from skewing the result.
+
+    Lookup strategy:
+      1. MINIFIG object_type or CMF variant (suffix > 1): look up as MINIFIG via Rebrickable
+      2. SET: try BrickLink SET type with base number
+      3. GEAR fallback: keychains, accessories and GWP items that BL lists as GEAR not SET
     """
     if not BL_CONSUMER_KEY:
         return None
@@ -228,19 +249,33 @@ def bl_get_price(set_number: str, condition: str) -> float | None:
     base, _, suffix = set_number.partition("-")
     is_cmf_variant = suffix.isdigit() and int(suffix) > 1
 
-    # CMF individual figures: look up as MINIFIG on BrickLink
-    if is_cmf_variant:
+    # ── MINIFIG / CMF path ────────────────────────────────────────────────────
+    if object_type == "MINIFIG" or is_cmf_variant:
         bl_fig_id = _rb_get_bl_minifig_id(set_number)
         if bl_fig_id:
-            return (_bl_fetch_price("MINIFIG", bl_fig_id, condition, "sold") or
-                    _bl_fetch_price("MINIFIG", bl_fig_id, condition, "stock"))
-        # No BrickLink MINIFIG id found – don't fall back to base SET price
-        return None
+            price = _weighted_price(
+                _bl_fetch_raw("MINIFIG", bl_fig_id, condition, "sold"),
+                _bl_fetch_raw("MINIFIG", bl_fig_id, condition, "stock"),
+            )
+            if price:
+                return price
+        # Explicit MINIFIG type: don't fall through to SET lookup
+        if object_type == "MINIFIG":
+            return None
 
-    # Standard SET lookup with sold → stock fallback
-    item_id = base  # BrickLink uses base number without suffix for sets
-    return (_bl_fetch_price("SET", item_id, condition, "sold") or
-            _bl_fetch_price("SET", item_id, condition, "stock"))
+    # ── SET path ──────────────────────────────────────────────────────────────
+    price = _weighted_price(
+        _bl_fetch_raw("SET", base, condition, "sold"),
+        _bl_fetch_raw("SET", base, condition, "stock"),
+    )
+    if price:
+        return price
+
+    # ── GEAR fallback (keychains, accessories, GWP items) ────────────────────
+    return _weighted_price(
+        _bl_fetch_raw("GEAR", base, condition, "sold"),
+        _bl_fetch_raw("GEAR", base, condition, "stock"),
+    )
 
 def rb_resolve_themes(data: dict) -> dict:
     """Resolve theme/subtheme hierarchy and add _theme_name/_subtheme_name."""
@@ -784,7 +819,7 @@ with tab_collection:
                 progress = st.progress(0, text="Henter priser ...")
                 updated, no_data = 0, []
                 for i, obj in enumerate(missing_price):
-                    price = bl_get_price(obj["set_number"], obj.get("condition", "USED"))
+                    price = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"))
                     if price:
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
@@ -1302,7 +1337,7 @@ with tab_register:
 
                 bl_price = None
                 if rec.get("set_number") and rec.get("object_type") in ("SET", "MINIFIG"):
-                    bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"))
+                    bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"), rec.get("object_type", "SET"))
 
                 ownership_id = next_ownership_id()
                 record = {
