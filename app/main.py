@@ -261,14 +261,45 @@ def _cmf_derived_bl_id(set_number: str) -> str | None:
     return f"col{series}-{variant}"
 
 
-def _rb_get_bl_minifig_id(set_number: str) -> str | None:
+def _bl_name_matches(col_id: str, expected_name: str) -> bool:
+    """
+    Fetch item name from BrickLink catalog and check it matches expected_name.
+    Used to validate derived col* IDs before trusting their price.
+    Returns True if names match, False if they don't, True if BL name unavailable
+    (fail-open: if we can't verify, we accept rather than silently drop the price).
+    """
+    if not expected_name:
+        return True
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/items/MINIFIG/{col_id}",
+            auth=_bl_auth(), timeout=8,
+        )
+        if not r.ok:
+            return True  # can't verify — accept
+        bl_name = r.json().get("data", {}).get("name", "")
+        if not bl_name:
+            return True  # no name returned — accept
+
+        def _norm(s: str) -> str:
+            return s.lower().replace("(cmf)", "").replace("(classic)", "").strip()
+
+        n_exp = _norm(expected_name)
+        n_bl  = _norm(bl_name)
+        match = n_exp in n_bl or n_bl in n_exp
+        return match
+    except Exception:
+        return True  # network error — accept rather than silently drop
+
+
+def _rb_get_bl_minifig_id(set_number: str, expected_name: str = "") -> str | None:
     """
     Find the BrickLink MINIFIG id (col*) for a CMF individual figure.
 
     Strategy:
       1. Check set's own external_ids.BrickLink (works for older CMF series)
       2. Follow set → minifig → minifig external_ids (common for series 71011+)
-      3. Derive col* ID from CMF series mapping as last resort
+      3. Derive col* ID from CMF series mapping, then validate name against BrickLink
     """
     try:
         # Step 1: try set-level external IDs (works for 8683-era series)
@@ -292,7 +323,7 @@ def _rb_get_bl_minifig_id(set_number: str) -> str | None:
         figs = r2.json().get("results", [])
         if len(figs) != 1:
             return None  # ambiguous — not a single-figure CMF set
-        fig_num = figs[0].get("fig_num")
+        fig_num = figs[0].get("set_num")  # field is "set_num" in this endpoint
         if not fig_num:
             return None
         r3 = requests.get(
@@ -305,12 +336,17 @@ def _rb_get_bl_minifig_id(set_number: str) -> str | None:
             if str(ext).startswith("col"):
                 return str(ext)
 
-        # Step 3: Rebrickable has no BL ID — derive from CMF series mapping
-        return _cmf_derived_bl_id(set_number)
+        # Step 3: derive from series mapping and validate name via BrickLink catalog
+        derived = _cmf_derived_bl_id(set_number)
+        if derived and _bl_name_matches(derived, expected_name):
+            return derived
+        return None
     except Exception:
         return None
 
-def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> float | None:
+
+def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
+                 name: str = "") -> float | None:
     """
     Fetch BrickLink price (NOK) using a quantity-weighted average of sold + stock data.
     This prevents outlier sales (e.g. one sale at 4× market price) from skewing the result.
@@ -330,7 +366,7 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> f
     # CMF variants (suffix > 1) must be priced as MINIFIG via Rebrickable BL ID.
     # Do NOT fall through to SET price — that would return the full series price.
     if object_type == "MINIFIG" or is_cmf_variant:
-        bl_fig_id = _rb_get_bl_minifig_id(set_number)
+        bl_fig_id = _rb_get_bl_minifig_id(set_number, name)
         if bl_fig_id:
             price = _weighted_price(
                 _bl_fetch_raw("MINIFIG", bl_fig_id, condition, "sold"),
@@ -901,7 +937,7 @@ with tab_collection:
                 progress = st.progress(0, text="Henter priser ...")
                 updated, no_data = 0, []
                 for i, obj in enumerate(missing_price):
-                    price = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"))
+                    price = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""))
                     if price:
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
@@ -1419,7 +1455,7 @@ with tab_register:
 
                 bl_price = None
                 if rec.get("set_number") and rec.get("object_type") in ("SET", "MINIFIG"):
-                    bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"), rec.get("object_type", "SET"))
+                    bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"), rec.get("object_type", "SET"), rec.get("name", ""))
 
                 ownership_id = next_ownership_id()
                 record = {
