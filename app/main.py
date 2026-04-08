@@ -227,15 +227,48 @@ def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
         return round(stock_avg, 2)
     return None
 
+# Mapping from LEGO CMF base set number → BrickLink series number.
+# Used to derive col* IDs when Rebrickable has no BL external_ids.
+# Series 1-8: BL uses sequential col001-col128 (16 figures each).
+# Series 9+:  BL uses col{series}-{variant}.
+_CMF_SERIES_BY_BASE: dict[str, int] = {
+    "8683": 1,  "8684": 2,  "8803": 3,  "8804": 4,
+    "8805": 5,  "8827": 6,  "8831": 7,  "8833": 8,
+    "71000": 9, "71001": 10, "71002": 11, "71004": 12,
+    "71007": 13, "71008": 14, "71011": 15, "71013": 16,
+    "71018": 17, "71021": 18, "71025": 19, "71027": 20,
+    "71029": 21, "71032": 22, "71034": 23, "71037": 24,
+    "71038": 25,
+}
+
+def _cmf_derived_bl_id(set_number: str) -> str | None:
+    """
+    Derive a BrickLink col* ID from a CMF set number using the series mapping.
+    Example: 71011-16 → series 15, variant 16 → 'col15-16'
+             8683-3   → series 1,  variant 3  → 'col003'
+    Returns None if set_number is not a known CMF series.
+    """
+    base, _, variant = set_number.partition("-")
+    if not variant.isdigit():
+        return None
+    series = _CMF_SERIES_BY_BASE.get(base)
+    if not series:
+        return None
+    var_num = int(variant)
+    if series <= 8:
+        # Sequential IDs: series 1 starts at col001, each series has 16 figures
+        return f"col{(series - 1) * 16 + var_num:03d}"
+    return f"col{series}-{variant}"
+
+
 def _rb_get_bl_minifig_id(set_number: str) -> str | None:
     """
     Find the BrickLink MINIFIG id (col*) for a CMF individual figure.
 
     Strategy:
       1. Check set's own external_ids.BrickLink (works for older CMF series)
-      2. If empty: fetch the single minifig inside the set, then look up that
-         minifig's external_ids — Rebrickable stores col* IDs on the minifig
-         record, not always on the set record (common for series 71011+)
+      2. Follow set → minifig → minifig external_ids (common for series 71011+)
+      3. Derive col* ID from CMF series mapping as last resort
     """
     try:
         # Step 1: try set-level external IDs (works for 8683-era series)
@@ -271,7 +304,9 @@ def _rb_get_bl_minifig_id(set_number: str) -> str | None:
         for ext in r3.json().get("external_ids", {}).get("BrickLink", []):
             if str(ext).startswith("col"):
                 return str(ext)
-        return None
+
+        # Step 3: Rebrickable has no BL ID — derive from CMF series mapping
+        return _cmf_derived_bl_id(set_number)
     except Exception:
         return None
 

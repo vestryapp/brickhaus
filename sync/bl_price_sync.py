@@ -117,6 +117,29 @@ def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
     return None
 
 
+_CMF_SERIES_BY_BASE: dict[str, int] = {
+    "8683": 1,  "8684": 2,  "8803": 3,  "8804": 4,
+    "8805": 5,  "8827": 6,  "8831": 7,  "8833": 8,
+    "71000": 9, "71001": 10, "71002": 11, "71004": 12,
+    "71007": 13, "71008": 14, "71011": 15, "71013": 16,
+    "71018": 17, "71021": 18, "71025": 19, "71027": 20,
+    "71029": 21, "71032": 22, "71034": 23, "71037": 24,
+    "71038": 25,
+}
+
+def _cmf_derived_bl_id(set_number: str) -> str | None:
+    base, _, variant = set_number.partition("-")
+    if not variant.isdigit():
+        return None
+    series = _CMF_SERIES_BY_BASE.get(base)
+    if not series:
+        return None
+    var_num = int(variant)
+    if series <= 8:
+        return f"col{(series - 1) * 16 + var_num:03d}"
+    return f"col{series}-{variant}"
+
+
 def _rb_bl_minifig_id(set_number: str) -> str | None:
     """
     Find the BrickLink MINIFIG id (col*) for a CMF individual figure.
@@ -154,7 +177,9 @@ def _rb_bl_minifig_id(set_number: str) -> str | None:
         for ext in r3.json().get("external_ids", {}).get("BrickLink", []):
             if str(ext).startswith("col"):
                 return str(ext)
-        return None
+
+        # Step 3: Rebrickable has no BL ID — derive from CMF series mapping
+        return _cmf_derived_bl_id(set_number)
     except Exception:
         return None
 
