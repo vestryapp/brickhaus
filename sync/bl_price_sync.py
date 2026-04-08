@@ -148,10 +148,17 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET") -> f
             return None  # Don't fall through to SET for explicit MINIFIGs
 
     # ── SET path ──────────────────────────────────────────────────────────────
+    # Try base number first (BrickLink standard), then with "-1" suffix.
+    # Some sets (polybags, older sets) are only found with the revision suffix.
     price = _weighted_price(
         _fetch_raw("SET", base, condition, "sold"),
         _fetch_raw("SET", base, condition, "stock"),
     )
+    if not price:
+        price = _weighted_price(
+            _fetch_raw("SET", f"{base}-1", condition, "sold"),
+            _fetch_raw("SET", f"{base}-1", condition, "stock"),
+        )
     if price:
         return price
 
