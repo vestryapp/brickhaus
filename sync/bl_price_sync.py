@@ -90,6 +90,9 @@ def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
     """
     Quantity-weighted average across sold (last 6 months) and stock (current listings).
     Prevents single high-priced outlier sales from dominating when few transactions exist.
+
+    Falls back to simple avg_price if BrickLink reports total_quantity=0
+    (can happen for items with historical price data but no recent activity).
     """
     def extract(d: dict | None) -> tuple[float, int]:
         if not d:
@@ -101,10 +104,17 @@ def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
     sold_avg,  sold_qty  = extract(sold)
     stock_avg, stock_qty = extract(stock)
     total = sold_qty + stock_qty
-    if total == 0 or (sold_avg == 0 and stock_avg == 0):
-        return None
-    weighted = (sold_avg * sold_qty + stock_avg * stock_qty) / total
-    return round(weighted, 2) if weighted > 0 else None
+
+    if total > 0:
+        weighted = (sold_avg * sold_qty + stock_avg * stock_qty) / total
+        return round(weighted, 2) if weighted > 0 else None
+
+    # total_quantity=0 but price data exists (older/rare items) – use avg directly
+    if sold_avg > 0:
+        return round(sold_avg, 2)
+    if stock_avg > 0:
+        return round(stock_avg, 2)
+    return None
 
 
 def _rb_bl_minifig_id(set_number: str) -> str | None:
