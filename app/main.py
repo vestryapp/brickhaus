@@ -17,6 +17,7 @@ import requests
 from requests_oauthlib import OAuth1
 import streamlit as st
 from PIL import Image, ImageDraw
+import anthropic
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -27,9 +28,70 @@ BL_CONSUMER_KEY     = os.environ.get("BRICKLINK_CONSUMER_KEY", "")
 BL_CONSUMER_SECRET  = os.environ.get("BRICKLINK_CONSUMER_SECRET", "")
 BL_TOKEN            = os.environ.get("BRICKLINK_TOKEN", "")
 BL_TOKEN_SECRET     = os.environ.get("BRICKLINK_TOKEN_SECRET", "")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 
 def _bl_auth():
     return OAuth1(BL_CONSUMER_KEY, BL_CONSUMER_SECRET, BL_TOKEN, BL_TOKEN_SECRET)
+
+
+def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
+    """
+    Use Claude Vision to identify a Lego set from an image (box or built set).
+    Returns: {"set_number": str|None, "name": str|None, "confidence": "high"|"medium"|"low", "note": str}
+    """
+    if not ANTHROPIC_API_KEY:
+        return {"set_number": None, "name": None, "confidence": "low",
+                "note": "ANTHROPIC_API_KEY ikke satt."}
+    try:
+        img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        media_type = content_type if content_type in (
+            "image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=256,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": img_b64},
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Du er ekspert på Lego-sett. Se på dette bildet – det kan vise en Lego-eske "
+                            "eller et ferdig bygget Lego-sett.\n\n"
+                            "Identifiser settnummeret hvis mulig. Svar KUN med et JSON-objekt, ingen annen tekst:\n"
+                            '{"set_number": "75192", "name": "Millennium Falcon", "confidence": "high"}\n\n'
+                            "Confidence-verdier: \"high\" (sikker), \"medium\" (trolig riktig), \"low\" (usikker).\n"
+                            "Hvis du ikke kan identifisere settet, bruk null for set_number og name, og \"low\" for confidence.\n"
+                            "Sett-nummeret skal kun inneholde tall og bindestrek, f.eks. \"75192\" eller \"71011-8\"."
+                        ),
+                    },
+                ],
+            }],
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = json.loads(raw.strip())
+        return {
+            "set_number":  result.get("set_number"),
+            "name":        result.get("name"),
+            "confidence":  result.get("confidence", "low"),
+            "note":        "",
+        }
+    except json.JSONDecodeError:
+        return {"set_number": None, "name": None, "confidence": "low",
+                "note": "Kunne ikke tolke svar fra AI."}
+    except Exception as e:
+        return {"set_number": None, "name": None, "confidence": "low",
+                "note": f"Feil: {e}"}
 
 SB_HEADERS = {
     "apikey":        SUPABASE_KEY,
@@ -394,6 +456,8 @@ def init_state():
         "reg_saved":         False,
         "reg_ownership_id":  None,
         "reg_obj_uuid":      None,
+        "reg_input_mode":    None,
+        "reg_ai_result":     None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -404,7 +468,8 @@ init_state()
 def reset_registration():
     keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_status",
             "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants",
-            "reg_saved","reg_ownership_id","reg_obj_uuid"]
+            "reg_saved","reg_ownership_id","reg_obj_uuid",
+            "reg_input_mode","reg_ai_result"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -686,9 +751,8 @@ with tab_register:
                 col.markdown(f"<div style='text-align:center;color:#aaa'>{label}</div>",
                              unsafe_allow_html=True)
 
-    # ── STEP 1: Set number ────────────────────────────────────────────────────
+    # ── STEP 1: Choose input mode + identify ─────────────────────────────────
     if step == 1:
-        st.subheader("Settnummer")
 
         def _apply_rb_data(data: dict):
             st.session_state["rb_name"]     = data.get("name", "")
@@ -717,75 +781,162 @@ with tab_register:
                 st.session_state["rb_status"]   = "multiple"
                 st.session_state["rb_variants"] = variants
 
-        def _on_set_num_change():
-            st.session_state["rb_fetch_trigger"] = True
+        input_mode = st.session_state.get("reg_input_mode")
 
-        set_num = st.text_input(
-            "Settnummer",
-            value=st.session_state["reg_set_number"],
-            placeholder="f.eks. 75192",
-            key="_set_num_input",
-            on_change=_on_set_num_change,
-        )
-
-        # Enter-key trigger
-        if st.session_state.get("rb_fetch_trigger") and set_num.strip():
-            st.session_state["rb_fetch_trigger"] = False
-            st.session_state["reg_set_number"] = set_num.strip()
-            with st.spinner("Henter ..."):
-                _do_rb_fetch(set_num.strip())
-            st.rerun()
-
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            fetch_btn = st.button("🔍 Hent info fra Rebrickable", use_container_width=True,
-                                  type="primary", disabled=not set_num.strip())
-        with col_b:
-            skip_btn = st.button("MOC / løse deler", use_container_width=True)
-
-        if fetch_btn and set_num.strip():
-            st.session_state["rb_fetch_trigger"] = False
-            st.session_state["reg_set_number"] = set_num.strip()
-            with st.spinner("Henter ..."):
-                _do_rb_fetch(set_num.strip())
-            st.rerun()
-
-        if skip_btn:
-            st.session_state["reg_set_number"] = set_num.strip()
-            st.session_state["reg_step"] = 2
-            st.rerun()
-
-        # ── Variant gallery ───────────────────────────────────────────────────
-        if st.session_state["rb_status"] == "multiple":
-            variants = st.session_state["rb_variants"] or []
-            st.info(f"Fant {len(variants)} varianter — velg riktig:")
-            cols_per_row = 4
-            for row_start in range(0, len(variants), cols_per_row):
-                row_variants = variants[row_start:row_start + cols_per_row]
-                cols = st.columns(cols_per_row)
-                for col, v in zip(cols, row_variants):
-                    with col:
-                        with st.container(border=True):
-                            if v.get("set_img_url"):
-                                st.image(v["set_img_url"], use_container_width=True)
-                            st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
-                            if st.button("Velg", key=f"pick_{v['set_num']}",
-                                         use_container_width=True):
-                                with st.spinner("Henter detaljer ..."):
-                                    data = rb_lookup(v["set_num"])
-                                if data:
-                                    _apply_rb_data(data)
-                                    st.session_state["reg_set_number"] = v["set_num"]
-                                st.rerun()
-
-        elif st.session_state["rb_status"] == "not_found":
-            st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
-            if st.button("Gå videre →", type="primary"):
+        # ── Mode selector ─────────────────────────────────────────────────────
+        if input_mode is None:
+            st.subheader("Registrer nytt objekt")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("📷  Start med bilde", use_container_width=True,
+                             type="primary", disabled=not ANTHROPIC_API_KEY):
+                    st.session_state["reg_input_mode"] = "image"
+                    st.rerun()
+                if not ANTHROPIC_API_KEY:
+                    st.caption("(krever ANTHROPIC_API_KEY)")
+            with c2:
+                if st.button("🔢  Skriv inn settnummer", use_container_width=True,
+                             type="primary"):
+                    st.session_state["reg_input_mode"] = "number"
+                    st.rerun()
+            st.divider()
+            if st.button("MOC / løse deler →", use_container_width=True):
                 st.session_state["reg_step"] = 2
                 st.rerun()
+            st.divider()
+            _progress_indicator(step)
 
-        st.divider()
-        _progress_indicator(step)
+        # ── Image path ────────────────────────────────────────────────────────
+        elif input_mode == "image":
+            st.subheader("📷 Identifiser med bilde")
+            st.caption("Last opp bilde av eske eller ferdig bygget sett")
+
+            ai_result = st.session_state.get("reg_ai_result")
+
+            if ai_result is None:
+                img_file = st.file_uploader(
+                    "Velg bilde",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="reg_id_img",
+                    label_visibility="collapsed",
+                )
+                if img_file:
+                    if st.button("🔍 Identifiser sett", type="primary",
+                                 use_container_width=True):
+                        with st.spinner("Analyserer bilde ..."):
+                            result = identify_lego_from_image(
+                                img_file.read(), img_file.type)
+                        st.session_state["reg_ai_result"] = result
+                        st.rerun()
+            else:
+                conf = ai_result.get("confidence", "low")
+                sett = ai_result.get("set_number")
+                name = ai_result.get("name")
+
+                if sett and conf in ("high", "medium"):
+                    conf_label = "🟢 Høy sikkerhet" if conf == "high" else "🟡 Middels sikkerhet"
+                    st.success(f"**Gjenkjent:** {name} ({sett}) — {conf_label}")
+                    col_yes, col_no = st.columns(2)
+                    with col_yes:
+                        if st.button("✅ Stemmer — fortsett", type="primary",
+                                     use_container_width=True):
+                            st.session_state["reg_set_number"] = sett
+                            with st.spinner("Henter fra Rebrickable ..."):
+                                _do_rb_fetch(sett)
+                            st.rerun()
+                    with col_no:
+                        if st.button("❌ Stemmer ikke", use_container_width=True):
+                            st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_input_mode"] = "number"
+                            st.rerun()
+                else:
+                    st.warning("Kunne ikke identifisere settet med tilstrekkelig sikkerhet.")
+                    if ai_result.get("note"):
+                        st.caption(ai_result["note"])
+                    elif sett:
+                        st.caption(f"Beste gjett: {name} ({sett}) — for usikkert til å fortsette automatisk.")
+                    if st.button("🔢 Gå til manuelt settnummer", type="primary",
+                                 use_container_width=True):
+                        if sett:
+                            st.session_state["reg_set_number"] = sett
+                        st.session_state["reg_ai_result"]  = None
+                        st.session_state["reg_input_mode"] = "number"
+                        st.rerun()
+
+            if st.button("← Tilbake", use_container_width=True):
+                st.session_state["reg_ai_result"]  = None
+                st.session_state["reg_input_mode"] = None
+                st.rerun()
+            st.divider()
+            _progress_indicator(step)
+
+        # ── Number path ───────────────────────────────────────────────────────
+        elif input_mode == "number":
+            st.subheader("🔢 Settnummer")
+
+            def _on_set_num_change():
+                st.session_state["rb_fetch_trigger"] = True
+
+            set_num = st.text_input(
+                "Settnummer",
+                value=st.session_state["reg_set_number"] or "",
+                placeholder="f.eks. 75192",
+                key="_set_num_input",
+                on_change=_on_set_num_change,
+            )
+
+            if st.session_state.get("rb_fetch_trigger") and set_num.strip():
+                st.session_state["rb_fetch_trigger"] = False
+                st.session_state["reg_set_number"] = set_num.strip()
+                with st.spinner("Henter ..."):
+                    _do_rb_fetch(set_num.strip())
+                st.rerun()
+
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                if st.button("🔍 Hent info fra Rebrickable", use_container_width=True,
+                             type="primary", disabled=not set_num.strip()):
+                    st.session_state["rb_fetch_trigger"] = False
+                    st.session_state["reg_set_number"] = set_num.strip()
+                    with st.spinner("Henter ..."):
+                        _do_rb_fetch(set_num.strip())
+                    st.rerun()
+            with col_b:
+                if st.button("← Tilbake", use_container_width=True):
+                    st.session_state["reg_input_mode"] = None
+                    st.rerun()
+
+            # ── Variant gallery ───────────────────────────────────────────────
+            if st.session_state["rb_status"] == "multiple":
+                variants = st.session_state["rb_variants"] or []
+                st.info(f"Fant {len(variants)} varianter — velg riktig:")
+                cols_per_row = 4
+                for row_start in range(0, len(variants), cols_per_row):
+                    row_variants = variants[row_start:row_start + cols_per_row]
+                    cols = st.columns(cols_per_row)
+                    for col, v in zip(cols, row_variants):
+                        with col:
+                            with st.container(border=True):
+                                if v.get("set_img_url"):
+                                    st.image(v["set_img_url"], use_container_width=True)
+                                st.caption(f"**{v.get('name', '')}**  \n{v.get('set_num', '')}")
+                                if st.button("Velg", key=f"pick_{v['set_num']}",
+                                             use_container_width=True):
+                                    with st.spinner("Henter detaljer ..."):
+                                        data = rb_lookup(v["set_num"])
+                                    if data:
+                                        _apply_rb_data(data)
+                                        st.session_state["reg_set_number"] = v["set_num"]
+                                    st.rerun()
+
+            elif st.session_state["rb_status"] == "not_found":
+                st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
+                if st.button("Gå videre →", type="primary"):
+                    st.session_state["reg_step"] = 2
+                    st.rerun()
+
+            st.divider()
+            _progress_indicator(step)
 
     # ── STEP 2: Details ───────────────────────────────────────────────────────
     elif step == 2:
