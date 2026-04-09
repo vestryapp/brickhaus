@@ -1088,16 +1088,14 @@ with tab_collection:
                     progress.progress((i + 1) / len(stale_cmf),
                                       text=f"Oppdaterer {i+1}/{len(stale_cmf)} ...")
                 progress.empty()
-                st.cache_data.clear()
                 if ok:
                     st.success(f"✅ Oppdatert navn for {ok} CMF-figurer")
                 if fail:
                     st.warning(f"⚠️ {fail} figurer fikk ikke riktig navn")
-                with st.expander("Detaljer"):
+                with st.expander("Detaljer", expanded=True):
                     for d in details:
                         st.caption(d)
-                if ok:
-                    st.rerun()
+                st.stop()
 
     # Flag CMF figures registered without variant suffix — these can't be auto-priced
     _cmf_bases = {"8683","8684","8803","8804","8805","8827","8831","8833",
