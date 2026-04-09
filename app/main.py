@@ -686,6 +686,10 @@ def fmt_nok(val):
     return f"{int(val):,} kr".replace(",", "\u00a0")
 
 
+_CMF_BASES = {"8683","8684","8803","8804","8805","8827","8831","8833",
+              "71000","71001","71002","71004","71007","71008","71011","71013",
+              "71018","71021","71025","71027","71029","71032","71034","71037","71038"}
+
 def display_name(obj: dict) -> str:
     """Return trimmed BL name if available, otherwise Rebrickable name.
     BL names often have parenthetical suffixes like '(Complete Set with Stand and Accessories)'
@@ -695,8 +699,14 @@ def display_name(obj: dict) -> str:
         bl = html.unescape(bl)  # clean up legacy HTML entities from BL API
         # Trim at first '(' — e.g. "Queen, Series 15 (Complete Set...)" → "Queen, Series 15"
         idx = bl.find("(")
-        return bl[:idx].rstrip(", ") if idx > 0 else bl
-    return obj.get("name") or "–"
+        name = bl[:idx].rstrip(", ") if idx > 0 else bl
+    else:
+        name = obj.get("name") or "–"
+    # Sealed CMF without variant suffix = random/unknown contents
+    sn = obj.get("set_number") or ""
+    if sn in _CMF_BASES:
+        name += " (random bag)"
+    return name
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -1100,11 +1110,8 @@ with tab_collection:
                 st.stop()
 
     # Flag CMF figures registered without variant suffix — these can't be auto-priced
-    _cmf_bases = {"8683","8684","8803","8804","8805","8827","8831","8833",
-                  "71000","71001","71002","71004","71007","71008","71011","71013",
-                  "71018","71021","71025","71027","71029","71032","71034","71037","71038"}
     cmf_no_suffix = [o for o in objects
-                     if o.get("set_number") and o["set_number"] in _cmf_bases]
+                     if o.get("set_number") and o["set_number"] in _CMF_BASES]
     if cmf_no_suffix:
         with st.expander(f"⚠️ {len(cmf_no_suffix)} CMF-figurer mangler variant-suffiks — kan ikke auto-prises"):
             st.caption("Disse er registrert med bare basisnummer (f.eks. «8683» i stedet for «8683-3»). "
@@ -1128,7 +1135,7 @@ with tab_collection:
             "Tilstand": CONDITION_LABEL.get(o.get("condition", ""), "–"),
             "Kvalitet": QUALITY_LABEL.get(o.get("quality_level", ""), "–"),
             "Lokasjon": o.get("location_name", "–"),
-            "Verdi":    fmt_nok(o.get("estimated_value_bl")),
+            "Verdi":    fmt_nok(o.get("estimated_value_bl")) if o.get("estimated_value_bl") else "⚠️ Mangler",
             "Kostpris": fmt_nok(o.get("total_cost_nok")),
             "Notater":  o.get("notes") or "",
         } for o in filtered]
