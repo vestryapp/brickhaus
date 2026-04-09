@@ -189,25 +189,45 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
         return None
 
 
+_USD_TO_NOK = 10.5  # approximate fallback rate, updated periodically
+
 def _bl_fetch_raw(item_type: str, item_id: str,
                   condition: str, guide_type: str) -> dict | None:
-    """Single BrickLink price API call. Returns raw data dict or None."""
+    """Single BrickLink price API call. Tries NOK/Europe first, falls back to USD global."""
     new_or_used = "N" if condition == "SEALED" else "U"
+    url = f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}/price"
+    auth = _bl_auth()
+
+    # Try NOK / Europe first
     try:
-        r = requests.get(
-            f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}/price",
-            auth=_bl_auth(),
-            params={
-                "guide_type":    guide_type,
-                "new_or_used":   new_or_used,
-                "currency_code": "NOK",
-                "region":        "europe",
-            },
-            timeout=10,
-        )
+        r = requests.get(url, auth=auth, params={
+            "guide_type": guide_type, "new_or_used": new_or_used,
+            "currency_code": "NOK", "region": "europe",
+        }, timeout=10)
+        if r.ok:
+            data = r.json().get("data")
+            if data and int(data.get("total_quantity") or 0) > 0:
+                return data
+    except Exception:
+        pass
+
+    # Fallback: USD global (no region filter) → convert to NOK
+    try:
+        r = requests.get(url, auth=auth, params={
+            "guide_type": guide_type, "new_or_used": new_or_used,
+            "currency_code": "USD",
+        }, timeout=10)
         if not r.ok:
             return None
-        return r.json().get("data") or None
+        data = r.json().get("data")
+        if not data or int(data.get("total_quantity") or 0) == 0:
+            return None
+        # Convert USD prices to NOK
+        for key in ("min_price", "max_price", "avg_price", "qty_avg_price"):
+            if data.get(key):
+                data[key] = str(round(float(data[key]) * _USD_TO_NOK, 2))
+        data["currency_code"] = "NOK"
+        return data
     except Exception:
         return None
 
