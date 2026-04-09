@@ -378,17 +378,33 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
         return None, None
 
     # ── Direct bl_item_no lookup (from Excel import or manual entry) ─────────
-    # If we have a col* ID from BrickLink, use it directly — no Rebrickable needed.
-    if bl_item_no and bl_item_no.startswith("col"):
-        # col*-IDs are SET type on BrickLink (figure + stand + accessories)
-        price = _weighted_price(
-            _bl_fetch_raw("SET", bl_item_no, condition, "sold"),
-            _bl_fetch_raw("SET", bl_item_no, condition, "stock"),
-        )
-        bl_name = _fetch_bl_name("SET", bl_item_no)
-        if price:
-            return price, bl_name
-        return None, bl_name  # return name even if no price data
+    # bl_item_no is the authoritative BrickLink ID when it differs from set_number.
+    # col*-IDs are SET type on BrickLink; other bl_item_no values try SET then GEAR.
+    if bl_item_no:
+        if bl_item_no.startswith("col"):
+            # col*-IDs are SET type on BrickLink (figure + stand + accessories)
+            price = _weighted_price(
+                _bl_fetch_raw("SET", bl_item_no, condition, "sold"),
+                _bl_fetch_raw("SET", bl_item_no, condition, "stock"),
+            )
+            bl_name = _fetch_bl_name("SET", bl_item_no)
+            if price:
+                return price, bl_name
+            return None, bl_name
+        elif bl_item_no != set_number:
+            # Non-col bl_item_no — try SET, then GEAR
+            bl_base = bl_item_no.split("-")[0]
+            for item_type in ("SET", "GEAR"):
+                for item_id in (bl_item_no, bl_base):
+                    price = _weighted_price(
+                        _bl_fetch_raw(item_type, item_id, condition, "sold"),
+                        _bl_fetch_raw(item_type, item_id, condition, "stock"),
+                    )
+                    bl_name_candidate = _fetch_bl_name(item_type, item_id)
+                    if price:
+                        return price, bl_name_candidate
+            bl_name = _fetch_bl_name("SET", bl_item_no)
+            return None, bl_name
 
     base, _, suffix = set_number.partition("-")
     is_cmf_variant = suffix.isdigit() and int(suffix) > 1
@@ -407,19 +423,6 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
             if price:
                 return price, bl_name
         return None, None  # No BL MINIFIG ID found — better no price than wrong price
-
-    # ── Direct bl_item_no for SET/GEAR (if different from set_number) ────────
-    if bl_item_no and bl_item_no != set_number:
-        bl_base = bl_item_no.split("-")[0]
-        for item_type in ("SET", "GEAR"):
-            for item_id in (bl_item_no, bl_base):
-                price = _weighted_price(
-                    _bl_fetch_raw(item_type, item_id, condition, "sold"),
-                    _bl_fetch_raw(item_type, item_id, condition, "stock"),
-                )
-                if price:
-                    bl_name = _fetch_bl_name(item_type, item_id)
-                    return price, bl_name
 
     # ── SET path ──────────────────────────────────────────────────────────────
     # Try base number first (BrickLink standard), then with "-1" suffix.
@@ -777,7 +780,12 @@ def edit_dialog(obj: dict, loc_list: list):
                              disabled=not is_moc,
                              help="Navn kan kun redigeres for MOC og Mod. BL-navn vises automatisk i samlingsoversikten." if not is_moc else None)
         set_number_edit = st.text_input("Settnummer", value=obj.get("set_number") or "",
-                                        help="Endre settnummer, f.eks. fra '8683' til '8683-3' for CMF-variant.")
+                                        help="Ditt logiske settnummer, f.eks. 71011-16 for Queen i Series 15.")
+        bl_item_no_edit = st.text_input("BrickLink Item-nr",
+                                         value=obj.get("bl_item_no") or "",
+                                         help="BrickLinks eget oppslags-ID for pris og navn. "
+                                              "F.eks. col15-16 for CMF, eller 6385680-1 for komplett boks. "
+                                              "Brukes til pris/navn-oppslag hvis ulikt settnummer.")
         object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
                                    index=list(TYPE_LABEL.keys()).index(obj.get("object_type", "SET")),
                                    format_func=lambda x: TYPE_LABEL[x])
@@ -907,10 +915,13 @@ def edit_dialog(obj: dict, loc_list: list):
             price     = float(purchase_price) if purchase_price else None
             total_nok = price if (price and purchase_currency == "NOK") else obj.get("total_cost_nok")
             new_sn = set_number_edit.strip()
+            new_bl = bl_item_no_edit.strip() or None
             sn_changed = new_sn and new_sn != (obj.get("set_number") or "")
+            bl_changed = new_bl != (obj.get("bl_item_no") or None)
             updates = {
                 "name":              name.strip() if is_moc else obj.get("name"),
                 "set_number":        new_sn or obj.get("set_number"),
+                "bl_item_no":        new_bl,
                 "object_type":       object_type,
                 "theme":             theme.strip() or None,
                 "subtheme":          subtheme.strip() or None,
@@ -932,8 +943,8 @@ def edit_dialog(obj: dict, loc_list: list):
             }
             sb_patch("objects", {"ownership_id": f"eq.{oid}"}, updates)
 
-            # If set_number changed, clear stale BL data so it gets re-fetched
-            if sn_changed:
+            # If set_number or bl_item_no changed, clear stale BL data so it gets re-fetched
+            if sn_changed or bl_changed:
                 sb_patch("objects", {"ownership_id": f"eq.{oid}"},
                          {"name_bl": None, "estimated_value_bl": None})
 

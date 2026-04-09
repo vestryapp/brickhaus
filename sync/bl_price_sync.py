@@ -235,16 +235,30 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
       3. GEAR fallback: keychains, accessories and GWP items BL lists as GEAR not SET
     """
     # ── Direct bl_item_no lookup ─────────────────────────────────────────────
-    if bl_item_no and bl_item_no.startswith("col"):
-        # col*-IDs are SET type on BrickLink (figure + stand + accessories)
-        price = _weighted_price(
-            _fetch_raw("SET", bl_item_no, condition, "sold"),
-            _fetch_raw("SET", bl_item_no, condition, "stock"),
-        )
-        bl_name = _fetch_bl_name("SET", bl_item_no)
-        if price:
-            return price, bl_name
-        return None, bl_name
+    # bl_item_no is the authoritative BrickLink ID when set.
+    if bl_item_no:
+        if bl_item_no.startswith("col"):
+            price = _weighted_price(
+                _fetch_raw("SET", bl_item_no, condition, "sold"),
+                _fetch_raw("SET", bl_item_no, condition, "stock"),
+            )
+            bl_name = _fetch_bl_name("SET", bl_item_no)
+            if price:
+                return price, bl_name
+            return None, bl_name
+        elif bl_item_no != set_number:
+            bl_base = bl_item_no.split("-")[0]
+            for item_type in ("SET", "GEAR"):
+                for item_id in (bl_item_no, bl_base):
+                    price = _weighted_price(
+                        _fetch_raw(item_type, item_id, condition, "sold"),
+                        _fetch_raw(item_type, item_id, condition, "stock"),
+                    )
+                    bl_name_candidate = _fetch_bl_name(item_type, item_id)
+                    if price:
+                        return price, bl_name_candidate
+            bl_name = _fetch_bl_name("SET", bl_item_no)
+            return None, bl_name
 
     base, _, suffix = set_number.partition("-")
     is_cmf = suffix.isdigit() and int(suffix) > 1
@@ -261,19 +275,6 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
             if price:
                 return price, bl_name
         return None, None
-
-    # ── Direct bl_item_no for SET/GEAR ───────────────────────────────────────
-    if bl_item_no and bl_item_no != set_number:
-        bl_base = bl_item_no.split("-")[0]
-        for item_type in ("SET", "GEAR"):
-            for item_id in (bl_item_no, bl_base):
-                price = _weighted_price(
-                    _fetch_raw(item_type, item_id, condition, "sold"),
-                    _fetch_raw(item_type, item_id, condition, "stock"),
-                )
-                if price:
-                    bl_name = _fetch_bl_name(item_type, item_id)
-                    return price, bl_name
 
     # ── SET path ──────────────────────────────────────────────────────────────
     for item_id in (base, f"{base}-1"):
