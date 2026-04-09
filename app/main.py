@@ -191,10 +191,9 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
 
 _USD_TO_NOK = 10.5  # approximate fallback rate, updated periodically
 
-def _bl_fetch_raw(item_type: str, item_id: str,
-                  condition: str, guide_type: str) -> dict | None:
-    """Single BrickLink price API call. Tries NOK/Europe first, falls back to USD global."""
-    new_or_used = "N" if condition == "SEALED" else "U"
+def _bl_fetch_one(item_type: str, item_id: str,
+                  new_or_used: str, guide_type: str) -> dict | None:
+    """Try NOK/Europe, then USD global for a single condition (N or U)."""
     url = f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}/price"
     auth = _bl_auth()
 
@@ -211,7 +210,7 @@ def _bl_fetch_raw(item_type: str, item_id: str,
     except Exception:
         pass
 
-    # Fallback: USD global (no region filter) → convert to NOK
+    # Fallback: USD global → convert to NOK
     try:
         r = requests.get(url, auth=auth, params={
             "guide_type": guide_type, "new_or_used": new_or_used,
@@ -222,7 +221,6 @@ def _bl_fetch_raw(item_type: str, item_id: str,
         data = r.json().get("data")
         if not data or int(data.get("total_quantity") or 0) == 0:
             return None
-        # Convert USD prices to NOK
         for key in ("min_price", "max_price", "avg_price", "qty_avg_price"):
             if data.get(key):
                 data[key] = str(round(float(data[key]) * _USD_TO_NOK, 2))
@@ -230,6 +228,19 @@ def _bl_fetch_raw(item_type: str, item_id: str,
         return data
     except Exception:
         return None
+
+def _bl_fetch_raw(item_type: str, item_id: str,
+                  condition: str, guide_type: str) -> dict | None:
+    """BrickLink price lookup. Tries the matching condition first, then
+    falls back to the opposite condition if no data exists."""
+    new_or_used = "N" if condition == "SEALED" else "U"
+    data = _bl_fetch_one(item_type, item_id, new_or_used, guide_type)
+    if data:
+        return data
+    # Fallback: try opposite condition (e.g. "opened box" has no Used data,
+    # but has New data — still a better estimate than nothing)
+    opposite = "U" if new_or_used == "N" else "N"
+    return _bl_fetch_one(item_type, item_id, opposite, guide_type)
 
 def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
     """

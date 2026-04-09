@@ -86,12 +86,10 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
 
 _USD_TO_NOK = 10.5  # approximate fallback rate
 
-def _fetch_raw(item_type: str, item_id: str, condition: str, guide_type: str) -> dict | None:
-    """Single BrickLink price API call. Tries NOK/Europe first, falls back to USD global."""
-    new_or_used = "N" if condition == "SEALED" else "U"
+def _fetch_one(item_type: str, item_id: str,
+               new_or_used: str, guide_type: str) -> dict | None:
+    """Try NOK/Europe, then USD global for a single condition."""
     url = f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}/price"
-
-    # Try NOK / Europe first
     try:
         r = requests.get(url, auth=BL_AUTH, params={
             "guide_type": guide_type, "new_or_used": new_or_used,
@@ -103,8 +101,6 @@ def _fetch_raw(item_type: str, item_id: str, condition: str, guide_type: str) ->
                 return data
     except Exception:
         pass
-
-    # Fallback: USD global → convert to NOK
     try:
         r = requests.get(url, auth=BL_AUTH, params={
             "guide_type": guide_type, "new_or_used": new_or_used,
@@ -122,6 +118,15 @@ def _fetch_raw(item_type: str, item_id: str, condition: str, guide_type: str) ->
         return data
     except Exception:
         return None
+
+def _fetch_raw(item_type: str, item_id: str, condition: str, guide_type: str) -> dict | None:
+    """Try matching condition first, fall back to opposite."""
+    new_or_used = "N" if condition == "SEALED" else "U"
+    data = _fetch_one(item_type, item_id, new_or_used, guide_type)
+    if data:
+        return data
+    opposite = "U" if new_or_used == "N" else "N"
+    return _fetch_one(item_type, item_id, opposite, guide_type)
 
 
 def _weighted_price(sold: dict | None, stock: dict | None) -> float | None:
