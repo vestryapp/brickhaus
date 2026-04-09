@@ -1063,9 +1063,9 @@ with tab_collection:
     # Re-fetch BL names for CMF figures that have bl_item_no but a stale/generic name
     if BL_CONSUMER_KEY:
         stale_cmf = [o for o in objects
-                     if o.get("bl_item_no", "").startswith("col")
+                     if (o.get("bl_item_no") or "").startswith("col")
                      and o.get("name_bl")
-                     and "Complete Random Set" in html.unescape(o.get("name_bl", ""))]
+                     and "Complete Random Set" in html.unescape(o.get("name_bl") or "")]
         if stale_cmf:
             if st.button(f"🔄 Oppdater BL-navn for {len(stale_cmf)} CMF-figurer (feil serie-navn)",
                          type="secondary",
