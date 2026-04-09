@@ -9,6 +9,7 @@ Run:  streamlit run app/main.py
 import os
 import io
 import json
+import html
 import base64
 from datetime import date
 from pathlib import Path
@@ -182,7 +183,8 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
         )
         if not r.ok:
             return None
-        return r.json().get("data", {}).get("name") or None
+        raw = r.json().get("data", {}).get("name") or None
+        return html.unescape(raw) if raw else None
     except Exception:
         return None
 
@@ -689,6 +691,7 @@ def display_name(obj: dict) -> str:
     which we strip for display. The full name is stored in name_bl for reference."""
     bl = obj.get("name_bl")
     if bl:
+        bl = html.unescape(bl)  # clean up legacy HTML entities from BL API
         # Trim at first '(' — e.g. "Queen, Series 15 (Complete Set...)" → "Queen, Series 15"
         idx = bl.find("(")
         return bl[:idx].rstrip(", ") if idx > 0 else bl
@@ -748,7 +751,7 @@ def edit_dialog(obj: dict, loc_list: list):
     # Show BrickLink official name if available
     bl_full = obj.get("name_bl")
     if bl_full:
-        st.caption(f"🏷️ BrickLink: {bl_full}")
+        st.caption(f"🏷️ BrickLink: {html.unescape(bl_full)}")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -1055,6 +1058,35 @@ with tab_collection:
                 st.cache_data.clear()
                 st.success(f"✅ Hentet navn for {names_ok} objekter"
                            + (f" ({names_fail} ikke funnet)" if names_fail else ""))
+                st.rerun()
+
+    # Re-fetch BL names for CMF figures that have bl_item_no but a stale/generic name
+    if BL_CONSUMER_KEY:
+        stale_cmf = [o for o in objects
+                     if o.get("bl_item_no", "").startswith("col")
+                     and o.get("name_bl")
+                     and "Complete Random Set" in html.unescape(o.get("name_bl", ""))]
+        if stale_cmf:
+            if st.button(f"🔄 Oppdater BL-navn for {len(stale_cmf)} CMF-figurer (feil serie-navn)",
+                         type="secondary",
+                         help="Disse har generisk serie-navn i stedet for figurnavn. Klikk for å hente riktig navn via col*-ID."):
+                progress = st.progress(0, text="Oppdaterer CMF-navn ...")
+                ok, fail = 0, 0
+                for i, obj in enumerate(stale_cmf):
+                    bl_name = _fetch_bl_name("MINIFIG", obj["bl_item_no"])
+                    if bl_name:
+                        sb_patch("objects",
+                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
+                                 {"name_bl": bl_name})
+                        ok += 1
+                    else:
+                        fail += 1
+                    progress.progress((i + 1) / len(stale_cmf),
+                                      text=f"Oppdaterer {i+1}/{len(stale_cmf)} ...")
+                progress.empty()
+                st.cache_data.clear()
+                st.success(f"✅ Oppdatert navn for {ok} CMF-figurer"
+                           + (f" ({fail} ikke funnet)" if fail else ""))
                 st.rerun()
 
     # Flag CMF figures registered without variant suffix — these can't be auto-priced

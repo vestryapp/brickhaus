@@ -19,6 +19,7 @@ Run locally:  python3 sync/bl_price_sync.py
 
 import os
 import json
+import html
 import time
 from pathlib import Path
 from dotenv import load_dotenv
@@ -77,7 +78,8 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
         )
         if not r.ok:
             return None
-        return r.json().get("data", {}).get("name") or None
+        raw = r.json().get("data", {}).get("name") or None
+        return html.unescape(raw) if raw else None
     except Exception:
         return None
 
