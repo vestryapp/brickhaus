@@ -68,6 +68,20 @@ def fetch_all_sets():
     return rows
 
 
+def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
+    """Fetch the official BrickLink catalog name for an item."""
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}",
+            auth=BL_AUTH, timeout=8,
+        )
+        if not r.ok:
+            return None
+        return r.json().get("data", {}).get("name") or None
+    except Exception:
+        return None
+
+
 def _fetch_raw(item_type: str, item_id: str, condition: str, guide_type: str) -> dict | None:
     """Single BrickLink price API call. Returns raw data dict or None."""
     new_or_used = "N" if condition == "SEALED" else "U"
@@ -206,9 +220,11 @@ def _rb_bl_minifig_id(set_number: str, expected_name: str = "") -> str | None:
 
 
 def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
-                 name: str = "") -> float | None:
+                 name: str = "") -> tuple[float | None, str | None]:
     """
-    Fetch BrickLink price (NOK) using a quantity-weighted average of sold + stock data.
+    Fetch BrickLink price (NOK) and official BL name.
+
+    Returns (price, bl_name) tuple. Either or both may be None.
 
     Lookup strategy:
       1. MINIFIG object_type or CMF variant (suffix > 1): look up as MINIFIG via Rebrickable
@@ -228,9 +244,10 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
                 _fetch_raw("MINIFIG", fig_id, condition, "sold"),
                 _fetch_raw("MINIFIG", fig_id, condition, "stock"),
             )
+            bl_name = _fetch_bl_name("MINIFIG", fig_id)
             if price:
-                return price
-        return None  # No BL MINIFIG ID found — better no price than wrong price
+                return price, bl_name
+        return None, None  # No BL MINIFIG ID found — better no price than wrong price
 
     # ── SET path ──────────────────────────────────────────────────────────────
     # Try base number first (BrickLink standard), then with "-1" suffix.
@@ -241,21 +258,27 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
             _fetch_raw("SET", item_id, condition, "stock"),
         )
         if price:
-            return price
+            bl_name = _fetch_bl_name("SET", item_id)
+            return price, bl_name
 
     # ── GEAR fallback (keychains, accessories, GWP items) ────────────────────
-    return _weighted_price(
+    price = _weighted_price(
         _fetch_raw("GEAR", base, condition, "sold"),
         _fetch_raw("GEAR", base, condition, "stock"),
     )
+    if price:
+        bl_name = _fetch_bl_name("GEAR", base)
+        return price, bl_name
+    return None, None
 
 
-def update_price(ownership_id: str, price: float):
+def update_object(ownership_id: str, updates: dict):
+    """Patch one or more fields on an object by ownership_id."""
     requests.patch(
         f"{SUPABASE_URL}/rest/v1/objects",
         headers={**SB_HEADERS, "Prefer": "return=minimal"},
         params={"ownership_id": f"eq.{ownership_id}"},
-        data=json.dumps({"estimated_value_bl": price}),
+        data=json.dumps(updates),
     )
 
 
@@ -263,13 +286,24 @@ if __name__ == "__main__":
     sets = fetch_all_sets()
     print(f"Synkroniserer priser for {len(sets)} sett ...")
 
-    updated = skipped = 0
+    updated = skipped = names_updated = 0
     for i, obj in enumerate(sets):
-        price = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""))
+        price, bl_name = bl_get_price(
+            obj["set_number"], obj.get("condition", "USED"),
+            obj.get("object_type", "SET"), obj.get("name", ""),
+        )
+        patch = {}
         if price:
-            update_price(obj["ownership_id"], price)
+            patch["estimated_value_bl"] = price
+        if bl_name:
+            patch["name_bl"] = bl_name
+            names_updated += 1
+        if patch:
+            update_object(obj["ownership_id"], patch)
             updated += 1
-            print(f"  [{i+1}/{len(sets)}] {obj['ownership_id']} {obj['set_number']}: {price:.0f} kr")
+            name_info = f" | BL: {bl_name}" if bl_name else ""
+            price_info = f"{price:.0f} kr" if price else "—"
+            print(f"  [{i+1}/{len(sets)}] {obj['ownership_id']} {obj['set_number']}: {price_info}{name_info}")
         else:
             skipped += 1
             print(f"  [{i+1}/{len(sets)}] {obj['ownership_id']} {obj['set_number']}: ikke funnet")
@@ -277,4 +311,4 @@ if __name__ == "__main__":
         # BrickLink rate limit: stay well under 5000/dag
         time.sleep(0.5)
 
-    print(f"\nFerdig. Oppdatert: {updated}, ikke funnet: {skipped}")
+    print(f"\nFerdig. Oppdatert: {updated}, ikke funnet: {skipped}, navn hentet: {names_updated}")

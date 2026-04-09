@@ -173,6 +173,20 @@ def sb_patch(table, filters: dict, data: dict):
     )
     r.raise_for_status()
 
+def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
+    """Fetch the official BrickLink catalog name for an item."""
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}",
+            auth=_bl_auth(), timeout=8,
+        )
+        if not r.ok:
+            return None
+        return r.json().get("data", {}).get("name") or None
+    except Exception:
+        return None
+
+
 def _bl_fetch_raw(item_type: str, item_id: str,
                   condition: str, guide_type: str) -> dict | None:
     """Single BrickLink price API call. Returns raw data dict or None."""
@@ -346,10 +360,11 @@ def _rb_get_bl_minifig_id(set_number: str, expected_name: str = "") -> str | Non
 
 
 def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
-                 name: str = "") -> float | None:
+                 name: str = "") -> tuple[float | None, str | None]:
     """
-    Fetch BrickLink price (NOK) using a quantity-weighted average of sold + stock data.
-    This prevents outlier sales (e.g. one sale at 4× market price) from skewing the result.
+    Fetch BrickLink price (NOK) and official BL name.
+
+    Returns (price, bl_name) tuple. Either or both may be None.
 
     Lookup strategy:
       1. MINIFIG object_type or CMF variant (suffix > 1): look up as MINIFIG via Rebrickable
@@ -357,7 +372,7 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
       3. GEAR fallback: keychains, accessories and GWP items that BL lists as GEAR not SET
     """
     if not BL_CONSUMER_KEY:
-        return None
+        return None, None
 
     base, _, suffix = set_number.partition("-")
     is_cmf_variant = suffix.isdigit() and int(suffix) > 1
@@ -372,9 +387,10 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
                 _bl_fetch_raw("MINIFIG", bl_fig_id, condition, "sold"),
                 _bl_fetch_raw("MINIFIG", bl_fig_id, condition, "stock"),
             )
+            bl_name = _fetch_bl_name("MINIFIG", bl_fig_id)
             if price:
-                return price
-        return None  # No BL MINIFIG ID found — better no price than wrong price
+                return price, bl_name
+        return None, None  # No BL MINIFIG ID found — better no price than wrong price
 
     # ── SET path ──────────────────────────────────────────────────────────────
     # Try base number first (BrickLink standard), then with "-1" suffix.
@@ -385,13 +401,18 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
             _bl_fetch_raw("SET", item_id, condition, "stock"),
         )
         if price:
-            return price
+            bl_name = _fetch_bl_name("SET", item_id)
+            return price, bl_name
 
     # ── GEAR fallback (keychains, accessories, GWP items) ────────────────────
-    return _weighted_price(
+    price = _weighted_price(
         _bl_fetch_raw("GEAR", base, condition, "sold"),
         _bl_fetch_raw("GEAR", base, condition, "stock"),
     )
+    if price:
+        bl_name = _fetch_bl_name("GEAR", base)
+        return price, bl_name
+    return None, None
 
 def rb_resolve_themes(data: dict) -> dict:
     """Resolve theme/subtheme hierarchy and add _theme_name/_subtheme_name."""
@@ -479,7 +500,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "id,ownership_id,object_type,set_number,name,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
+            params={"select": "id,ownership_id,object_type,set_number,name,name_bl,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
         )
         chunk = r.json()
         if not chunk:
@@ -612,9 +633,9 @@ def save_documentation_image(object_uuid: str, ownership_id: str,
 
 CONDITION_LABEL = {
     "SEALED":     "🔒 Forseglet",
-    "OPENED":     "📦 Åpnet ubygget",
-    "BUILT":      "🔨 Bygget",
-    "USED":       "🪖 Brukt",
+    "OPENED":     "📦 Ubygget (åpnet)",
+    "BUILT":      "🧱 Bygget",
+    "USED":       "🔧 Brukt",
     "INCOMPLETE": "⚠️ Ufullstendig",
 }
 QUALITY_LABEL = {
@@ -635,6 +656,18 @@ def fmt_nok(val):
     if val is None:
         return "–"
     return f"{int(val):,} kr".replace(",", "\u00a0")
+
+
+def display_name(obj: dict) -> str:
+    """Return trimmed BL name if available, otherwise Rebrickable name.
+    BL names often have parenthetical suffixes like '(Complete Set with Stand and Accessories)'
+    which we strip for display. The full name is stored in name_bl for reference."""
+    bl = obj.get("name_bl")
+    if bl:
+        # Trim at first '(' — e.g. "Queen, Series 15 (Complete Set...)" → "Queen, Series 15"
+        idx = bl.find("(")
+        return bl[:idx].rstrip(", ") if idx > 0 else bl
+    return obj.get("name") or "–"
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -687,12 +720,17 @@ def edit_dialog(obj: dict, loc_list: list):
     oid = obj.get("ownership_id", "")
     st.caption(f"**{oid}** · Registrert: {obj.get('registered_at', '–')}")
 
+    # Show BrickLink official name if available
+    bl_full = obj.get("name_bl")
+    if bl_full:
+        st.caption(f"🏷️ BrickLink: {bl_full}")
+
     col1, col2 = st.columns(2)
     with col1:
         is_moc = obj.get("object_type") in ("MOC", "MOD")
         name = st.text_input("Navn *", value=obj.get("name") or "",
                              disabled=not is_moc,
-                             help="Navn kan kun redigeres for MOC og Mod" if not is_moc else None)
+                             help="Navn kan kun redigeres for MOC og Mod. BL-navn vises automatisk i samlingsoversikten." if not is_moc else None)
         object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
                                    index=list(TYPE_LABEL.keys()).index(obj.get("object_type", "SET")),
                                    format_func=lambda x: TYPE_LABEL[x])
@@ -903,6 +941,7 @@ with tab_collection:
         q = search.lower()
         filtered = [o for o in filtered if
             q in (o.get("name") or "").lower() or
+            q in (o.get("name_bl") or "").lower() or
             q in (o.get("theme") or "").lower() or
             q in (o.get("subtheme") or "").lower() or
             q in str(o.get("set_number") or "").lower() or
@@ -937,12 +976,20 @@ with tab_collection:
                 progress = st.progress(0, text="Henter priser ...")
                 updated, no_data = 0, []
                 for i, obj in enumerate(missing_price):
-                    price = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""))
-                    if price:
+                    price, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""))
+                    if price or bl_name:
+                        patch = {"valuation_date": str(date.today())}
+                        if price:
+                            patch["estimated_value_bl"] = price
+                        if bl_name:
+                            patch["name_bl"] = bl_name
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
-                                 {"estimated_value_bl": price, "valuation_date": str(date.today())})
-                        updated += 1
+                                 patch)
+                        if price:
+                            updated += 1
+                        else:
+                            no_data.append(f"{obj['ownership_id']} – {obj.get('name','')}")
                     else:
                         no_data.append(f"{obj['ownership_id']} – {obj.get('name','')}")
                     progress.progress((i + 1) / len(missing_price),
@@ -956,6 +1003,19 @@ with tab_collection:
                             st.caption(s)
                 st.rerun()
 
+    # Flag CMF figures registered without variant suffix — these can't be auto-priced
+    _cmf_bases = {"8683","8684","8803","8804","8805","8827","8831","8833",
+                  "71000","71001","71002","71004","71007","71008","71011","71013",
+                  "71018","71021","71025","71027","71029","71032","71034","71037","71038"}
+    cmf_no_suffix = [o for o in objects
+                     if o.get("set_number") and o["set_number"] in _cmf_bases]
+    if cmf_no_suffix:
+        with st.expander(f"⚠️ {len(cmf_no_suffix)} CMF-figurer mangler variant-suffiks — kan ikke auto-prises"):
+            st.caption("Disse er registrert med bare basisnummer (f.eks. «8683» i stedet for «8683-3»). "
+                       "Klikk raden og endre settnummeret til riktig variant for å aktivere automatisk prising.")
+            for o in cmf_no_suffix:
+                st.caption(f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})")
+
     st.divider()
 
     if not filtered:
@@ -966,7 +1026,7 @@ with tab_collection:
             "ID":       o.get("ownership_id", ""),
             "Type":     TYPE_LABEL.get(o.get("object_type", ""), ""),
             "Settnr.":  o.get("set_number") or "–",
-            "Navn":     o.get("name") or "–",
+            "Navn":     display_name(o),
             "Tema":     o.get("theme") or "–",
             "År":       o.get("year") or "–",
             "Tilstand": CONDITION_LABEL.get(o.get("condition", ""), "–"),
@@ -1453,9 +1513,9 @@ with tab_register:
                 instr_file    = rec.pop("_moc_instr_file", None)
                 loc_id        = get_or_create_location(loc_name) if loc_name else None
 
-                bl_price = None
+                bl_price, bl_name = None, None
                 if rec.get("set_number") and rec.get("object_type") in ("SET", "MINIFIG"):
-                    bl_price = bl_get_price(rec["set_number"], rec.get("condition", "USED"), rec.get("object_type", "SET"), rec.get("name", ""))
+                    bl_price, bl_name = bl_get_price(rec["set_number"], rec.get("condition", "USED"), rec.get("object_type", "SET"), rec.get("name", ""))
 
                 ownership_id = next_ownership_id()
                 record = {
@@ -1466,6 +1526,7 @@ with tab_register:
                     "registered_at":      str(date.today()),
                     "quality_level":      "BASIC",
                     "estimated_value_bl": bl_price,
+                    "name_bl":            bl_name,
                 }
                 save_object(record)
 

@@ -57,7 +57,10 @@ def rb_get_bl_minifig_id(set_number):
     if len(figs) > 1:
         return None, f"Ambiguous: {len(figs)} minifigs in set"
 
-    fig_num = figs[0].get("fig_num")
+    print(f"    → raw minifig entry keys: {list(figs[0].keys())}")
+    print(f"    → raw minifig entry: {json.dumps(figs[0], indent=6)}")
+
+    fig_num = figs[0].get("fig_num") or figs[0].get("set_num")
     print(f"    → found minifig {fig_num} ({figs[0].get('name','?')})")
 
     r3 = requests.get(f"https://rebrickable.com/api/v3/lego/minifigs/{fig_num}/",
@@ -75,6 +78,80 @@ def rb_get_bl_minifig_id(set_number):
 # ── Test ──────────────────────────────────────────────────────────────────────
 TEST_SETS = ["71011-16", "71011-1", "71029-1", "8683-1"]
 
+print("=" * 70)
+print("BRICKLINK DIRECT col* LOOKUP — do IDs exist and have price data?")
+print("=" * 70)
+
+def bl_minifig_item(col_id):
+    """Check if a BL MINIFIG item exists and has a name."""
+    auth = OAuth1(BL_CONSUMER_KEY, BL_CONSUMER_SECRET, BL_TOKEN, BL_TOKEN_SECRET)
+    r = requests.get(
+        f"https://api.bricklink.com/api/store/v1/items/MINIFIG/{col_id}",
+        auth=auth, timeout=10,
+    )
+    if r.ok:
+        d = r.json().get("data", {})
+        return d.get("name"), d.get("category_id")
+    return f"HTTP {r.status_code}", None
+
+# Test Series 15 (71011) — does col15-X pattern work?
+# Print full raw response for one item to see what BL actually returns
+auth_test = OAuth1(BL_CONSUMER_KEY, BL_CONSUMER_SECRET, BL_TOKEN, BL_TOKEN_SECRET)
+r_test = requests.get("https://api.bricklink.com/api/store/v1/items/MINIFIG/col15-1",
+                      auth=auth_test, timeout=10)
+print(f"\nRaw response for MINIFIG/col15-1:")
+print(f"  HTTP {r_test.status_code}")
+print(f"  Body: {r_test.text[:500]}")
+
+print("\nSeries 15 (71011) — col15-1 through col15-5:")
+for i in range(1, 6):
+    name, cat = bl_minifig_item(f"col15-{i}")
+    print(f"  col15-{i}: {name}  category={cat}")
+
+# Test Series 1 (8683) — sequential col001-col005
+print("\nSeries 1 (8683) — col001 through col005:")
+for i in range(1, 6):
+    name, cat = bl_minifig_item(f"col{i:03d}")
+    print(f"  col{i:03d}: {name}  category={cat}")
+
+# And check price for col15-16 specifically (Queen candidate)
+print("\nPrice check for col15-16 (Queen candidate):")
+qa, avg, qty = bl_price("MINIFIG", "col15-16", "U", "sold")
+print(f"  sold:  qty_avg={qa}  avg={avg}  total_qty={qty}")
+qa, avg, qty = bl_price("MINIFIG", "col15-16", "U", "stock")
+print(f"  stock: qty_avg={qa}  avg={avg}  total_qty={qty}")
+
+print()
+print("=" * 70)
+print("BRICKLINK SUBSETS — CMF series display box → individual figures")
+print("=" * 70)
+
+def bl_subsets(item_type, item_id):
+    auth = OAuth1(BL_CONSUMER_KEY, BL_CONSUMER_SECRET, BL_TOKEN, BL_TOKEN_SECRET)
+    r = requests.get(
+        f"https://api.bricklink.com/api/store/v1/items/{item_type}/{item_id}/subsets",
+        auth=auth, timeout=10,
+    )
+    if r.ok:
+        return r.json().get("data", [])
+    return f"HTTP {r.status_code}: {r.text[:200]}"
+
+for series_set in ["8683-1", "71011-1"]:
+    print(f"\nSubsets of SET/{series_set}:")
+    result = bl_subsets("SET", series_set)
+    if isinstance(result, str):
+        print(f"  ERROR: {result}")
+    else:
+        print(f"  {len(result)} subset entries")
+        for entry in result[:5]:   # first 5 only
+            for item in entry.get("entries", []):
+                no   = item.get("item", {}).get("no")
+                typ  = item.get("item", {}).get("type")
+                name = item.get("item", {}).get("name", "?")
+                qty  = item.get("quantity")
+                print(f"    {typ}/{no}  qty={qty}  {name}")
+
+print()
 print("=" * 70)
 print("TWO-STEP REBRICKABLE → BRICKLINK ID LOOKUP")
 print("=" * 70)
