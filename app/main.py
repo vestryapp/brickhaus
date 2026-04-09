@@ -1125,28 +1125,48 @@ with tab_collection:
                         st.caption(d)
                 st.stop()
 
-    # Flag CMF figures registered without variant suffix — these can't be auto-priced
+    # Flag CMF figures registered without variant suffix — split into random bags vs identified
     cmf_no_suffix = [o for o in objects
                      if o.get("set_number") and o["set_number"] in _CMF_BASES]
     if cmf_no_suffix:
-        with st.expander(f"⚠️ {len(cmf_no_suffix)} CMF-figurer mangler variant-suffiks — kan ikke auto-prises"):
-            st.caption("Disse er registrert med bare basisnummer (f.eks. «8683» i stedet for «8683-1»). "
-                       "Klikk knappen under for å legge til «-1» (forseglet random bag) på alle, "
-                       "eller klikk en rad for å sette riktig variant manuelt.")
-            if st.button(f"📦 Legg til -1 suffiks på {len(cmf_no_suffix)} CMF-er (random bag)",
-                         type="secondary",
-                         help="Setter settnummer til f.eks. 8683-1 for alle CMF uten suffiks. "
-                              "Dette gjør at de kan prises som forseglet random bag på BrickLink."):
-                for obj in cmf_no_suffix:
-                    new_sn = obj["set_number"] + "-1"
-                    sb_patch("objects",
-                             {"ownership_id": f"eq.{obj['ownership_id']}"},
-                             {"set_number": new_sn, "name_bl": None, "estimated_value_bl": None})
-                st.cache_data.clear()
-                st.success(f"✅ Oppdatert {len(cmf_no_suffix)} CMF-er til -1 suffiks")
-                st.rerun()
-            for o in cmf_no_suffix:
-                st.caption(f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})")
+        # Identified = has a bl_item_no OR a specific name (not generic series name)
+        _generic_names = {"Complete Random Set", "Innhold ukjent", "Ukjent", "Unknown"}
+        def _is_identified(o):
+            if o.get("bl_item_no"):
+                return True
+            n = o.get("name") or ""
+            return n and not any(g in n for g in _generic_names) and not n.startswith("Minifigure, Series")
+        cmf_identified = [o for o in cmf_no_suffix if _is_identified(o)]
+        cmf_random     = [o for o in cmf_no_suffix if not _is_identified(o)]
+
+        if cmf_random:
+            with st.expander(f"📦 {len(cmf_random)} forseglede CMF random bags uten suffiks"):
+                st.caption("Disse er forseglede/ukjente CMF-er. Klikk for å legge til «-1» (random bag) "
+                           "slik at de kan prises automatisk på BrickLink.")
+                if st.button(f"📦 Legg til -1 suffiks på {len(cmf_random)} random bags",
+                             type="secondary"):
+                    for obj in cmf_random:
+                        new_sn = obj["set_number"] + "-1"
+                        sb_patch("objects",
+                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
+                                 {"set_number": new_sn, "name_bl": None, "estimated_value_bl": None})
+                    st.cache_data.clear()
+                    st.success(f"✅ Oppdatert {len(cmf_random)} CMF-er til -1 suffiks")
+                    st.rerun()
+                for o in cmf_random:
+                    st.caption(f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})")
+
+        if cmf_identified:
+            with st.expander(f"🔍 {len(cmf_identified)} identifiserte CMF-figurer trenger riktig suffiks"):
+                st.caption("Disse har et kjent figurnavn men mangler variant-suffiks i settnummeret. "
+                           "Klikk raden i tabellen for å sette riktig suffiks manuelt, "
+                           "f.eks. «8803» → «8803-15» for Rapper.")
+                for o in cmf_identified:
+                    bl = o.get("bl_item_no") or ""
+                    lbl = f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})"
+                    if bl:
+                        lbl += f" · BL: {bl}"
+                    st.caption(lbl)
 
     st.divider()
 
