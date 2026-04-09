@@ -705,9 +705,10 @@ def display_name(obj: dict) -> str:
         name = bl[:idx].rstrip(", ") if idx > 0 else bl
     else:
         name = obj.get("name") or "–"
-    # Sealed CMF without variant suffix = random/unknown contents
+    # Sealed CMF random bag = base number or base-0
     sn = obj.get("set_number") or ""
-    if sn in _CMF_BASES:
+    sn_base = sn.rsplit("-", 1)[0] if "-" in sn else sn
+    if sn_base in _CMF_BASES and (sn == sn_base or sn.endswith("-0")):
         name += " (random bag)"
     return name
 
@@ -1138,9 +1139,10 @@ with tab_collection:
                         st.caption(d)
                 st.stop()
 
-    # Flag CMF figures registered without variant suffix — split into random bags vs identified
+    # Flag CMF figures registered without variant suffix (bare base number, no -0 or -N)
     cmf_no_suffix = [o for o in objects
-                     if o.get("set_number") and o["set_number"] in _CMF_BASES]
+                     if o.get("set_number") and o["set_number"] in _CMF_BASES
+                     and "-" not in o["set_number"]]
     if cmf_no_suffix:
         # Identified = has a bl_item_no OR a specific name (not generic series name)
         _generic_names = {"Complete Random Set", "Innhold ukjent", "Ukjent", "Unknown"}
@@ -1154,17 +1156,21 @@ with tab_collection:
 
         if cmf_random:
             with st.expander(f"📦 {len(cmf_random)} forseglede CMF random bags uten suffiks"):
-                st.caption("Disse er forseglede/ukjente CMF-er. Klikk for å legge til «-1» (random bag) "
-                           "slik at de kan prises automatisk på BrickLink.")
-                if st.button(f"📦 Legg til -1 suffiks på {len(cmf_random)} random bags",
+                st.caption("Disse er forseglede/ukjente CMF-er. Klikk for å sette riktig suffiks: "
+                           "Settnr → «8683-0» (Brickset-konvensjon), "
+                           "BL Item-nr → «8683-1» (BrickLink random bag).")
+                if st.button(f"📦 Sett -0 / -1 på {len(cmf_random)} random bags",
                              type="secondary"):
                     for obj in cmf_random:
-                        new_sn = obj["set_number"] + "-1"
+                        base = obj["set_number"]
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
-                                 {"set_number": new_sn, "name_bl": None, "estimated_value_bl": None})
+                                 {"set_number": f"{base}-0",
+                                  "bl_item_no": f"{base}-1",
+                                  "name_bl": None,
+                                  "estimated_value_bl": None})
                     st.cache_data.clear()
-                    st.success(f"✅ Oppdatert {len(cmf_random)} CMF-er til -1 suffiks")
+                    st.success(f"✅ Oppdatert {len(cmf_random)} random bags: settnr -0, BL -1")
                     st.rerun()
                 for o in cmf_random:
                     st.caption(f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})")
@@ -1223,7 +1229,7 @@ with tab_collection:
             if not o.get("name_bl"):
                 issues.append("BL-navn")
             sn = o.get("set_number") or ""
-            if sn in _CMF_BASES:
+            if sn in _CMF_BASES and "-" not in sn:
                 issues.append("variant-suffiks")
             if not issues:
                 return "✅"
