@@ -236,11 +236,12 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
     """
     # ── Direct bl_item_no lookup ─────────────────────────────────────────────
     if bl_item_no and bl_item_no.startswith("col"):
+        # col*-IDs are SET type on BrickLink (figure + stand + accessories)
         price = _weighted_price(
-            _fetch_raw("MINIFIG", bl_item_no, condition, "sold"),
-            _fetch_raw("MINIFIG", bl_item_no, condition, "stock"),
+            _fetch_raw("SET", bl_item_no, condition, "sold"),
+            _fetch_raw("SET", bl_item_no, condition, "stock"),
         )
-        bl_name = _fetch_bl_name("MINIFIG", bl_item_no)
+        bl_name = _fetch_bl_name("SET", bl_item_no)
         if price:
             return price, bl_name
         return None, bl_name

@@ -380,11 +380,12 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
     # ── Direct bl_item_no lookup (from Excel import or manual entry) ─────────
     # If we have a col* ID from BrickLink, use it directly — no Rebrickable needed.
     if bl_item_no and bl_item_no.startswith("col"):
+        # col*-IDs are SET type on BrickLink (figure + stand + accessories)
         price = _weighted_price(
-            _bl_fetch_raw("MINIFIG", bl_item_no, condition, "sold"),
-            _bl_fetch_raw("MINIFIG", bl_item_no, condition, "stock"),
+            _bl_fetch_raw("SET", bl_item_no, condition, "sold"),
+            _bl_fetch_raw("SET", bl_item_no, condition, "stock"),
         )
-        bl_name = _fetch_bl_name("MINIFIG", bl_item_no)
+        bl_name = _fetch_bl_name("SET", bl_item_no)
         if price:
             return price, bl_name
         return None, bl_name  # return name even if no price data
@@ -1075,20 +1076,8 @@ with tab_collection:
                 details = []
                 for i, obj in enumerate(stale_cmf):
                     col_id = obj["bl_item_no"]
-                    # Debug: fetch with full error info
-                    try:
-                        url = f"https://api.bricklink.com/api/store/v1/items/MINIFIG/{col_id}"
-                        r = requests.get(url, auth=_bl_auth(), timeout=8)
-                        if r.ok:
-                            bl_name = r.json().get("data", {}).get("name")
-                            if bl_name:
-                                bl_name = html.unescape(bl_name)
-                        else:
-                            bl_name = None
-                        debug = f"HTTP {r.status_code}: {r.text[:200]}"
-                    except Exception as e:
-                        bl_name = None
-                        debug = f"Exception: {e}"
+                    # col*-IDs are SET type on BrickLink, not MINIFIG
+                    bl_name = _fetch_bl_name("SET", col_id)
                     if bl_name and "Complete Random Set" not in bl_name:
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
