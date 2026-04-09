@@ -47,9 +47,11 @@ RB_HEADERS = {"Authorization": f"key {os.environ.get('REBRICKABLE_API_KEY', '')}
 
 
 def fetch_all_sets():
-    """Fetch all SET and MINIFIG objects that have a set_number."""
+    """Fetch all priceable objects that have a set_number or bl_item_no."""
+    # All BrickLink-matchable types
+    bl_types = ("SET", "MINIFIG", "PART", "GEAR", "BOOK", "CATALOG", "INSTRUCTION", "ORIGINAL_BOX")
     rows, limit = [], 1000
-    for obj_type in ("SET", "MINIFIG"):
+    for obj_type in bl_types:
         offset = 0
         while True:
             r = requests.get(
@@ -57,7 +59,7 @@ def fetch_all_sets():
                 headers={**SB_HEADERS, "Range": f"{offset}-{offset+limit-1}"},
                 params={"select": "ownership_id,set_number,bl_item_no,condition,object_type,name",
                         "object_type": f"eq.{obj_type}",
-                        "set_number": "not.is.null"},
+                        "or": "(set_number.not.is.null,bl_item_no.not.is.null)"},
             )
             chunk = r.json()
             if not chunk:
@@ -275,7 +277,8 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
         elif any(c.isalpha() for c in _bl_id.split("-")[0][-3:]):
             type_order = ["PART", "GEAR", "MINIFIG", "SET"]
         else:
-            type_order = ["SET", "GEAR", "MINIFIG", "PART"]
+            type_order = ["SET", "GEAR", "MINIFIG", "PART", "BOOK",
+                          "CATALOG", "INSTRUCTION", "ORIGINAL_BOX"]
 
         for item_type in type_order:
             bl_name = _fetch_bl_name(item_type, bl_item_no)

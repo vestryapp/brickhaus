@@ -424,7 +424,8 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
         elif any(c.isalpha() for c in _bl_id.split("-")[0][-3:]):
             type_order = ["PART", "GEAR", "MINIFIG", "SET"]  # likely a part ID
         else:
-            type_order = ["SET", "GEAR", "MINIFIG", "PART"]  # numeric = probably set
+            type_order = ["SET", "GEAR", "MINIFIG", "PART", "BOOK",
+                          "CATALOG", "INSTRUCTION", "ORIGINAL_BOX"]  # numeric = probably set
 
         for item_type in type_order:
             bl_name = _fetch_bl_name(item_type, bl_item_no)
@@ -562,7 +563,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
+            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,num_minifigs,is_built,has_instructions,has_original_box,completeness_level,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
         )
         chunk = r.json()
         if not chunk:
@@ -587,9 +588,10 @@ def next_ownership_id():
     )
     rows = r.json()
     if not rows:
-        return "LG-000001"
-    num = int(rows[0]["ownership_id"].split("-")[1]) + 1
-    return f"LG-{num:06d}"
+        return "BH-0000001"
+    last_id = rows[0]["ownership_id"]
+    num = int(last_id.split("-")[1]) + 1
+    return f"BH-{num:07d}"
 
 def get_or_create_location(name: str) -> str:
     existing = sb_get("locations", {"name": f"eq.{name}", "select": "id"})
@@ -700,18 +702,38 @@ CONDITION_LABEL = {
     "USED":       "🔧 Brukt",
     "INCOMPLETE": "⚠️ Ufullstendig",
 }
-QUALITY_LABEL = {
-    "BASIC":      "⚪ Basic",
-    "DOCUMENTED": "🔵 Documented",
-    "VERIFIED":   "🟢 Verified",
+DOK_LABEL = {
+    "BASIC":      "⚪ Registrert",
+    "DOCUMENTED": "🔵 Dokumentert",
+    "VERIFIED":   "🟢 Verifisert",
+}
+
+STATUS_LABEL = {
+    "OWNED":  "Eid",
+    "SOLD":   "Solgt",
+    "LOANED": "Utlånt",
+    "WANTED": "Ønskeliste",
+}
+
+COMPLETENESS_LABEL = {
+    "COMPLETE":         "Komplett",
+    "NEARLY_COMPLETE":  "Nesten komplett",
+    "INCOMPLETE":       "Ufullstendig",
+    "UNKNOWN":          "Ukjent",
 }
 TYPE_LABEL = {
     "SET":            "Sett",
     "MINIFIG":        "Minifig",
     "PART":           "Del",
-    "BULK_CONTAINER": "Bulk",
+    "GEAR":           "Gear",
+    "BOOK":           "Bok",
+    "CATALOG":        "Katalog",
+    "INSTRUCTION":    "Instruksjon",
+    "ORIGINAL_BOX":   "Originalboks",
     "MOC":            "MOC",
     "MOD":            "Mod",
+    "BULK":           "Bulk",
+    "BULK_CONTAINER": "Bulk",   # legacy — migrated to BULK
 }
 
 def fmt_nok(val):
@@ -794,7 +816,8 @@ def reset_registration():
 @st.dialog("Rediger objekt", width="large")
 def edit_dialog(obj: dict, loc_list: list):
     oid = obj.get("ownership_id", "")
-    st.caption(f"**{oid}** · Registrert: {obj.get('registered_at', '–')}")
+    dok = DOK_LABEL.get(obj.get("quality_level", "BASIC"), "⚪ Registrert")
+    st.caption(f"**{oid}** · {dok} · Registrert: {obj.get('registered_at', '–')}")
 
     # Show BrickLink official name and IDs
     bl_full = obj.get("name_bl")
@@ -807,6 +830,7 @@ def edit_dialog(obj: dict, loc_list: list):
         id_line += f"  ·  BL Item: **{bl_no}**"
     st.caption(id_line)
 
+    # ── Identitet ────────────────────────────────────────────────────────────
     col1, col2 = st.columns(2)
     with col1:
         is_moc = obj.get("object_type") in ("MOC", "MOD")
@@ -820,8 +844,13 @@ def edit_dialog(obj: dict, loc_list: list):
                                          help="BrickLinks eget oppslags-ID for pris og navn. "
                                               "F.eks. col15-16 for CMF, eller 6385680-1 for komplett boks. "
                                               "Brukes til pris/navn-oppslag hvis ulikt settnummer.")
-        object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
-                                   index=list(TYPE_LABEL.keys()).index(obj.get("object_type", "SET")),
+        # Filter out legacy BULK_CONTAINER from type selector
+        type_keys = [k for k in TYPE_LABEL.keys() if k != "BULK_CONTAINER"]
+        cur_type = obj.get("object_type", "SET")
+        if cur_type == "BULK_CONTAINER":
+            cur_type = "BULK"
+        object_type = st.selectbox("Type", type_keys,
+                                   index=type_keys.index(cur_type) if cur_type in type_keys else 0,
                                    format_func=lambda x: TYPE_LABEL[x])
         theme    = st.text_input("Tema",    value=obj.get("theme") or "")
         subtheme = st.text_input("Subtema", value=obj.get("subtheme") or "")
@@ -833,6 +862,12 @@ def edit_dialog(obj: dict, loc_list: list):
         condition = st.selectbox("Tilstand", cond_keys,
                                  index=cond_idx,
                                  format_func=lambda x: CONDITION_LABEL[x])
+        status_keys = list(STATUS_LABEL.keys())
+        cur_status = obj.get("status", "OWNED")
+        status_idx = status_keys.index(cur_status) if cur_status in status_keys else 0
+        obj_status = st.selectbox("Status", status_keys,
+                                   index=status_idx,
+                                   format_func=lambda x: STATUS_LABEL[x])
         loc_names   = [l["name"] for l in loc_list]
         current_loc = obj.get("location_name") or "– Ingen –"
         loc_options = ["– Ingen –"] + loc_names
@@ -841,6 +876,33 @@ def edit_dialog(obj: dict, loc_list: list):
         new_loc     = st.text_input("Eller ny lokasjon", placeholder="f.eks. Loft")
         sub_loc     = st.text_input("Sub-lokasjon", value=obj.get("sub_location") or "")
         notes       = st.text_area("Notater", value=obj.get("notes") or "")
+
+    # ── Innhold & komplettering ──────────────────────────────────────────────
+    st.subheader("Innhold")
+    ic1, ic2, ic3 = st.columns(3)
+    with ic1:
+        num_parts = st.number_input("Antall deler", min_value=0, step=1,
+                                     value=int(obj.get("num_parts") or 0))
+        num_minifigs = st.number_input("Antall minifigurer", min_value=0, step=1,
+                                        value=int(obj.get("num_minifigs") or 0))
+    with ic2:
+        has_instructions = st.toggle("Har instruksjoner",
+                                      value=bool(obj.get("has_instructions")),
+                                      key=f"has_instr_{oid}")
+        has_original_box = st.toggle("Har original boks",
+                                      value=bool(obj.get("has_original_box")),
+                                      key=f"has_box_{oid}")
+        is_built = st.toggle("Er bygget",
+                              value=bool(obj.get("is_built")),
+                              key=f"is_built_{oid}")
+    with ic3:
+        compl_keys = list(COMPLETENESS_LABEL.keys())
+        cur_compl = obj.get("completeness_level") or "UNKNOWN"
+        if cur_compl not in compl_keys:
+            cur_compl = "UNKNOWN"
+        completeness = st.selectbox("Kompletthetsgrad", compl_keys,
+                                     index=compl_keys.index(cur_compl),
+                                     format_func=lambda x: COMPLETENESS_LABEL[x])
 
     # ── Documentation image ───────────────────────────────────────────────────
     st.subheader("📷 Dokumentasjonsbilde")
@@ -876,20 +938,15 @@ def edit_dialog(obj: dict, loc_list: list):
     )
 
     # ── MOC / MOD-spesifikke felt ─────────────────────────────────────────────
-    if obj.get("object_type") in ("MOC", "MOD"):
+    if object_type in ("MOC", "MOD"):
         st.subheader("🔧 MOC / MOD")
         col_m1, col_m2 = st.columns(2)
         with col_m1:
-            num_parts = st.number_input(
-                "Antall deler",
-                min_value=0, step=10,
-                value=int(obj.get("num_parts") or 0),
-            )
             moc_base_set = st.text_input(
                 "Basert på sett (kun MOD)",
                 value=obj.get("moc_base_set") or "",
-                placeholder="f.eks. 75192-1",
-                disabled=obj.get("object_type") != "MOD",
+                placeholder="f.eks. 75192-1 eller BH-0000042",
+                disabled=object_type != "MOD",
             )
         with col_m2:
             rebrickable_moc_id = st.text_input(
@@ -897,11 +954,11 @@ def edit_dialog(obj: dict, loc_list: list):
                 value=obj.get("rebrickable_moc_id") or "",
                 placeholder="f.eks. MOC-12345",
             )
-            instructions_url = st.text_input(
-                "Instruksjonslenke",
-                value=obj.get("instructions_url") or "",
-                placeholder="https://rebrickable.com/mocs/...",
-            )
+        instructions_url = st.text_input(
+            "Instruksjonslenke",
+            value=obj.get("instructions_url") or "",
+            placeholder="https://rebrickable.com/mocs/...",
+        )
 
         # Show existing instruction file or upload new
         existing_instr = obj.get("instructions_storage_path")
@@ -914,7 +971,6 @@ def edit_dialog(obj: dict, loc_list: list):
             key=f"edit_instr_{oid}",
         )
     else:
-        num_parts = obj.get("num_parts")
         moc_base_set = obj.get("moc_base_set")
         rebrickable_moc_id = obj.get("rebrickable_moc_id")
         instructions_url = obj.get("instructions_url")
@@ -961,6 +1017,7 @@ def edit_dialog(obj: dict, loc_list: list):
                 "subtheme":          subtheme.strip() or None,
                 "year":              int(year),
                 "condition":         condition,
+                "status":            obj_status,
                 "location_id":       loc_id,
                 "sub_location":      sub_loc.strip() or None,
                 "notes":             notes.strip() or None,
@@ -971,6 +1028,11 @@ def edit_dialog(obj: dict, loc_list: list):
                 "total_cost_nok":       total_nok,
                 "estimated_value_bl":   float(est_value) if est_value else obj.get("estimated_value_bl"),
                 "num_parts":            int(num_parts) if num_parts else None,
+                "num_minifigs":         int(num_minifigs) if num_minifigs else None,
+                "has_instructions":     has_instructions,
+                "has_original_box":     has_original_box,
+                "is_built":             is_built,
+                "completeness_level":   completeness,
                 "moc_base_set":         moc_base_set.strip() if moc_base_set else None,
                 "rebrickable_moc_id":   rebrickable_moc_id.strip() if rebrickable_moc_id else None,
                 "instructions_url":     instructions_url.strip() if instructions_url else None,
@@ -1022,19 +1084,33 @@ with tab_collection:
 
     with st.sidebar:
         st.header("Filter")
-        search = st.text_input("🔍 Søk", "")
+        search = st.text_input("🔍 Søk", "", key="filter_search")
 
         all_themes = sorted({o["theme"] for o in objects if o.get("theme")})
-        sel_themes = st.multiselect("Tema", all_themes)
+        sel_themes = st.multiselect("Tema", all_themes, key="filter_themes")
 
         all_types = sorted({o["object_type"] for o in objects if o.get("object_type")})
-        sel_types = st.multiselect("Type", all_types, format_func=lambda x: TYPE_LABEL.get(x, x))
+        sel_types = st.multiselect("Type", all_types, format_func=lambda x: TYPE_LABEL.get(x, x), key="filter_types")
 
         all_conds = sorted({o["condition"] for o in objects if o.get("condition")})
-        sel_conds = st.multiselect("Tilstand", all_conds, format_func=lambda x: CONDITION_LABEL.get(x, x))
+        sel_conds = st.multiselect("Tilstand", all_conds, format_func=lambda x: CONDITION_LABEL.get(x, x), key="filter_conds")
 
         all_locs = sorted({o["location_name"] for o in objects if o.get("location_name") != "–"})
-        sel_locs = st.multiselect("Lokasjon", all_locs)
+        sel_locs = st.multiselect("Lokasjon", all_locs, key="filter_locs")
+
+        st.divider()
+        group_options = {"Ingen": None, "Tema": "theme", "Type": "object_type",
+                         "Lokasjon": "location_name", "År": "year"}
+        group_by = st.selectbox("Grupper etter", list(group_options.keys()),
+                                 index=0, key="group_by_select")
+
+        has_filter = bool(search or sel_themes or sel_types or sel_conds or sel_locs)
+        if has_filter:
+            if st.button("✕ Nullstill filter", use_container_width=True):
+                for k in ("filter_search", "filter_themes", "filter_types",
+                           "filter_conds", "filter_locs"):
+                    st.session_state[k] = [] if k != "filter_search" else ""
+                st.rerun()
 
     filtered = objects
     if search:
@@ -1055,168 +1131,12 @@ with tab_collection:
     if sel_locs:
         filtered = [o for o in filtered if o.get("location_name") in sel_locs]
 
-    n_sets      = sum(1 for o in filtered if o.get("object_type") == "SET")
+    n_objects   = len(filtered)
     total_value = sum(o.get("estimated_value_bl") or 0 for o in filtered)
 
     c1, c2 = st.columns(2)
-    c1.metric("Antall sett", f"{n_sets}")
+    c1.metric("Antall objekter", f"{n_objects}")
     c2.metric("Estimert verdi", fmt_nok(total_value) if total_value else "–")
-
-    # BrickLink price sync — only fills in missing prices.
-    # Full refresh of all existing prices runs via the monthly Railway cron job.
-    if BL_CONSUMER_KEY:
-        missing_price = [o for o in objects
-                         if o.get("object_type") in ("SET", "MINIFIG", "PART")
-                         and (o.get("set_number") or o.get("bl_item_no"))
-                         and not o.get("estimated_value_bl")]
-        if missing_price:
-            st.caption(f"⚠️ {len(missing_price)} sett mangler pris — klikk raden for å sette manuelt, eller hent automatisk")
-            if st.button("🔄 Hent manglende BrickLink-priser", type="secondary",
-                         help="Henter kun priser som mangler. Eksisterende priser oppdateres automatisk av månedlig synkronisering."):
-                progress = st.progress(0, text="Henter priser ...")
-                updated, no_data = 0, []
-                for i, obj in enumerate(missing_price):
-                    price, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""), obj.get("bl_item_no", ""))
-                    if price or bl_name:
-                        patch = {"valuation_date": str(date.today())}
-                        if price:
-                            patch["estimated_value_bl"] = price
-                        if bl_name:
-                            patch["name_bl"] = bl_name
-                        sb_patch("objects",
-                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
-                                 patch)
-                        if price:
-                            updated += 1
-                        else:
-                            no_data.append(f"{obj['ownership_id']} – {obj.get('name','')}")
-                    else:
-                        no_data.append(f"{obj['ownership_id']} – {obj.get('name','')}")
-                    progress.progress((i + 1) / len(missing_price),
-                                      text=f"Henter {i+1}/{len(missing_price)} ...")
-                progress.empty()
-                st.cache_data.clear()
-                st.success(f"✅ Hentet pris for {updated} av {len(missing_price)} sett")
-                if no_data:
-                    with st.expander(f"⚠️ {len(no_data)} sett fikk ikke pris — sjekk manuelt"):
-                        for s in no_data:
-                            st.caption(s)
-                st.rerun()
-
-    # BrickLink name backfill — fetch official BL names for objects that don't have one yet
-    if BL_CONSUMER_KEY:
-        missing_bl_name = [o for o in objects
-                           if o.get("object_type") in ("SET", "MINIFIG", "PART")
-                           and (o.get("set_number") or o.get("bl_item_no"))
-                           and not o.get("name_bl")]
-        if missing_bl_name:
-            if st.button(f"🏷️ Hent BrickLink-navn for {len(missing_bl_name)} objekter", type="secondary",
-                         help="Henter offisielle BrickLink-navn for objekter som mangler dette."):
-                progress = st.progress(0, text="Henter navn ...")
-                names_ok, names_fail = 0, 0
-                for i, obj in enumerate(missing_bl_name):
-                    _, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"),
-                                              obj.get("object_type", "SET"), obj.get("name", ""), obj.get("bl_item_no", ""))
-                    if bl_name:
-                        sb_patch("objects",
-                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
-                                 {"name_bl": bl_name})
-                        names_ok += 1
-                    else:
-                        names_fail += 1
-                    progress.progress((i + 1) / len(missing_bl_name),
-                                      text=f"Henter {i+1}/{len(missing_bl_name)} ...")
-                progress.empty()
-                st.cache_data.clear()
-                st.success(f"✅ Hentet navn for {names_ok} objekter"
-                           + (f" ({names_fail} ikke funnet)" if names_fail else ""))
-                st.rerun()
-
-    # Re-fetch BL names for CMF figures that have bl_item_no but a stale/generic name
-    if BL_CONSUMER_KEY:
-        stale_cmf = [o for o in objects
-                     if (o.get("bl_item_no") or "").startswith("col")
-                     and o.get("name_bl")
-                     and "Complete Random Set" in html.unescape(o.get("name_bl") or "")]
-        if stale_cmf:
-            if st.button(f"🔄 Oppdater BL-navn for {len(stale_cmf)} CMF-figurer (feil serie-navn)",
-                         type="secondary",
-                         help="Disse har generisk serie-navn i stedet for figurnavn. Klikk for å hente riktig navn via col*-ID."):
-                progress = st.progress(0, text="Oppdaterer CMF-navn ...")
-                ok, fail = 0, 0
-                details = []
-                for i, obj in enumerate(stale_cmf):
-                    col_id = obj["bl_item_no"]
-                    # col*-IDs are SET type on BrickLink, not MINIFIG
-                    bl_name = _fetch_bl_name("SET", col_id)
-                    if bl_name and "Complete Random Set" not in bl_name:
-                        sb_patch("objects",
-                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
-                                 {"name_bl": bl_name})
-                        ok += 1
-                        details.append(f"✅ {col_id} → {bl_name}")
-                    else:
-                        fail += 1
-                        details.append(f"❌ {col_id} → {debug}")
-                    progress.progress((i + 1) / len(stale_cmf),
-                                      text=f"Oppdaterer {i+1}/{len(stale_cmf)} ...")
-                progress.empty()
-                if ok:
-                    st.success(f"✅ Oppdatert navn for {ok} CMF-figurer")
-                if fail:
-                    st.warning(f"⚠️ {fail} figurer fikk ikke riktig navn")
-                with st.expander("Detaljer", expanded=True):
-                    for d in details:
-                        st.caption(d)
-                st.stop()
-
-    # Flag CMF figures registered without variant suffix (bare base number, no -0 or -N)
-    cmf_no_suffix = [o for o in objects
-                     if o.get("set_number") and o["set_number"] in _CMF_BASES
-                     and "-" not in o["set_number"]]
-    if cmf_no_suffix:
-        # Identified = has a bl_item_no OR a specific name (not generic series name)
-        _generic_names = {"Complete Random Set", "Innhold ukjent", "Ukjent", "Unknown"}
-        def _is_identified(o):
-            if o.get("bl_item_no"):
-                return True
-            n = o.get("name") or ""
-            return n and not any(g in n for g in _generic_names) and not n.startswith("Minifigure, Series")
-        cmf_identified = [o for o in cmf_no_suffix if _is_identified(o)]
-        cmf_random     = [o for o in cmf_no_suffix if not _is_identified(o)]
-
-        if cmf_random:
-            with st.expander(f"📦 {len(cmf_random)} forseglede CMF random bags uten suffiks"):
-                st.caption("Disse er forseglede/ukjente CMF-er. Klikk for å sette riktig suffiks: "
-                           "Settnr → «8683-0» (Brickset-konvensjon), "
-                           "BL Item-nr → «8683-1» (BrickLink random bag).")
-                if st.button(f"📦 Sett -0 / -1 på {len(cmf_random)} random bags",
-                             type="secondary"):
-                    for obj in cmf_random:
-                        base = obj["set_number"]
-                        sb_patch("objects",
-                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
-                                 {"set_number": f"{base}-0",
-                                  "bl_item_no": f"{base}-1",
-                                  "name_bl": None,
-                                  "estimated_value_bl": None})
-                    st.cache_data.clear()
-                    st.success(f"✅ Oppdatert {len(cmf_random)} random bags: settnr -0, BL -1")
-                    st.rerun()
-                for o in cmf_random:
-                    st.caption(f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})")
-
-        if cmf_identified:
-            with st.expander(f"🔍 {len(cmf_identified)} identifiserte CMF-figurer trenger riktig suffiks"):
-                st.caption("Disse har et kjent figurnavn men mangler variant-suffiks i settnummeret. "
-                           "Klikk raden i tabellen for å sette riktig suffiks manuelt, "
-                           "f.eks. «8803» → «8803-15» for Rapper.")
-                for o in cmf_identified:
-                    bl = o.get("bl_item_no") or ""
-                    lbl = f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})"
-                    if bl:
-                        lbl += f" · BL: {bl}"
-                    st.caption(lbl)
 
     st.divider()
 
@@ -1226,16 +1146,16 @@ with tab_collection:
         # Persistent sort controls — this is the only sort mechanism (dataframe column
         # sorting resets on every rerun, so we disable it by not relying on it).
         sort_cols = {
-            "Status": "_status", "ID": "ownership_id", "Settnr.": "set_number",
-            "Navn": "_display_name", "Tema": "theme", "År": "year",
-            "Verdi": "estimated_value_bl", "Tilstand": "condition",
-            "Lokasjon": "location_name", "Type": "object_type",
+            "Status": "_status", "Settnr.": "set_number", "Navn": "_display_name",
+            "Tema": "theme", "År": "year", "Type": "object_type",
+            "Tilstand": "condition", "Verdi": "estimated_value_bl",
+            "Lokasjon": "location_name", "ID": "ownership_id",
         }
         scol1, scol2, scol3 = st.columns([3, 1, 1])
         with scol1:
             sort_by = st.selectbox("Sorter etter", list(sort_cols.keys()),
                                    index=list(sort_cols.keys()).index(
-                                       st.session_state.get("sort_by", "ID")),
+                                       st.session_state.get("sort_by", "Settnr.")),
                                    key="sort_by_select", label_visibility="collapsed")
         with scol2:
             sort_dir = st.selectbox("Retning", ["↑ Stigende", "↓ Synkende"],
@@ -1274,37 +1194,92 @@ with tab_collection:
 
         st.caption("Klikk en rad for å se detaljer og redigere.")
 
-        rows = [{
-            "Status":   _row_status(o),
-            "ID":       o.get("ownership_id", ""),
-            "Type":     TYPE_LABEL.get(o.get("object_type", ""), ""),
-            "Settnr.":  o.get("set_number") or "–",
-            "Navn":     display_name(o),
-            "Tema":     o.get("theme") or "–",
-            "År":       o.get("year") or "–",
-            "Tilstand": CONDITION_LABEL.get(o.get("condition", ""), "–"),
-            "Kvalitet": QUALITY_LABEL.get(o.get("quality_level", ""), "–"),
-            "Lokasjon": o.get("location_name", "–"),
-            "Verdi":    fmt_nok(o.get("estimated_value_bl")),
-            "Kostpris": fmt_nok(o.get("total_cost_nok")),
-            "Notater":  o.get("notes") or "",
-        } for o in filtered]
-        event = st.dataframe(
-            rows,
-            use_container_width=True,
-            height=600,
-            on_select="rerun",
-            selection_mode="single-row",
-            column_config={
-                "Status": st.column_config.TextColumn(width="small"),
-                "Notater": st.column_config.TextColumn(width="medium"),
-            },
-        )
-        selected = event.selection.rows
-        if selected:
-            obj = filtered[selected[0]]
-            obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
-            edit_dialog(obj, loc_list)
+        def _make_rows(objs):
+            return [{
+                "Status":   _row_status(o),
+                "Settnr.":  o.get("set_number") or "–",
+                "Navn":     display_name(o),
+                "Tema":     o.get("theme") or "–",
+                "År":       o.get("year") or "–",
+                "Type":     TYPE_LABEL.get(o.get("object_type", ""), ""),
+                "Tilstand": CONDITION_LABEL.get(o.get("condition", ""), "–"),
+                "Verdi":    fmt_nok(o.get("estimated_value_bl")),
+                "Lokasjon": o.get("location_name", "–"),
+                "ID":       o.get("ownership_id", ""),
+            } for o in objs]
+
+        _col_config = {
+            "Status": st.column_config.TextColumn(width="small"),
+            "Type":   st.column_config.TextColumn(width="small"),
+            "År":     st.column_config.TextColumn(width="small"),
+            "ID":     st.column_config.TextColumn(width="small"),
+        }
+
+        group_field = group_options.get(group_by)
+
+        if not group_field:
+            # ── Flat table (no grouping) ─────────────────────────────────
+            rows = _make_rows(filtered)
+            event = st.dataframe(
+                rows,
+                use_container_width=True,
+                height=600,
+                on_select="rerun",
+                selection_mode="single-row",
+                column_config=_col_config,
+            )
+            selected = event.selection.rows
+            if selected:
+                obj = filtered[selected[0]]
+                obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
+                edit_dialog(obj, loc_list)
+        else:
+            # ── Accordion grouping ───────────────────────────────────────
+            from collections import OrderedDict
+            groups = OrderedDict()
+            for o in filtered:
+                key = o.get(group_field) or "– Ukjent –"
+                if group_field == "object_type":
+                    key = TYPE_LABEL.get(key, key)
+                elif group_field == "year":
+                    key = str(key) if key else "– Ukjent –"
+                groups.setdefault(key, []).append(o)
+
+            for grp_name, grp_objs in sorted(groups.items()):
+                grp_value = sum(o.get("estimated_value_bl") or 0 for o in grp_objs)
+                grp_label = f"{grp_name} ({len(grp_objs)} obj."
+                if grp_value:
+                    grp_label += f" · {fmt_nok(grp_value)}"
+                grp_label += ")"
+
+                with st.expander(grp_label):
+                    # Sub-group by subtema if grouping by tema
+                    if group_field == "theme":
+                        sub_groups = OrderedDict()
+                        for o in grp_objs:
+                            sk = o.get("subtheme") or "– Generelt –"
+                            sub_groups.setdefault(sk, []).append(o)
+                        if len(sub_groups) > 1:
+                            for sub_name, sub_objs in sorted(sub_groups.items()):
+                                sub_val = sum(o.get("estimated_value_bl") or 0 for o in sub_objs)
+                                st.caption(f"**{sub_name}** — {len(sub_objs)} obj."
+                                           + (f" · {fmt_nok(sub_val)}" if sub_val else ""))
+
+                    rows = _make_rows(grp_objs)
+                    event = st.dataframe(
+                        rows,
+                        use_container_width=True,
+                        height=min(400, 35 * len(grp_objs) + 40),
+                        on_select="rerun",
+                        selection_mode="single-row",
+                        column_config=_col_config,
+                        key=f"grp_{grp_name}",
+                    )
+                    selected = event.selection.rows
+                    if selected:
+                        obj = grp_objs[selected[0]]
+                        obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
+                        edit_dialog(obj, loc_list)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
