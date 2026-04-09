@@ -1192,36 +1192,29 @@ with tab_collection:
     if not filtered:
         st.info("Ingen objekter matcher filteret.")
     else:
-        # Persistent sort controls
+        # Persistent sort controls — this is the only sort mechanism (dataframe column
+        # sorting resets on every rerun, so we disable it by not relying on it).
         sort_cols = {
-            "ID": "ownership_id", "Settnr.": "set_number", "Navn": "_display_name",
-            "Tema": "theme", "År": "year", "Verdi": "estimated_value_bl",
-            "Tilstand": "condition", "Lokasjon": "location_name",
+            "Status": "_status", "ID": "ownership_id", "Settnr.": "set_number",
+            "Navn": "_display_name", "Tema": "theme", "År": "year",
+            "Verdi": "estimated_value_bl", "Tilstand": "condition",
+            "Lokasjon": "location_name", "Type": "object_type",
         }
-        scol1, scol2 = st.columns([3, 1])
+        scol1, scol2, scol3 = st.columns([3, 1, 1])
         with scol1:
             sort_by = st.selectbox("Sorter etter", list(sort_cols.keys()),
                                    index=list(sort_cols.keys()).index(
                                        st.session_state.get("sort_by", "ID")),
-                                   key="sort_by_select")
+                                   key="sort_by_select", label_visibility="collapsed")
         with scol2:
-            sort_asc = st.toggle("Stigende", value=st.session_state.get("sort_asc", True),
-                                 key="sort_asc_toggle")
+            sort_dir = st.selectbox("Retning", ["↑ Stigende", "↓ Synkende"],
+                                    index=0 if st.session_state.get("sort_asc", True) else 1,
+                                    key="sort_dir_select", label_visibility="collapsed")
+        sort_asc = sort_dir.startswith("↑")
         st.session_state["sort_by"] = sort_by
         st.session_state["sort_asc"] = sort_asc
 
-        # Sort filtered list
-        _sk = sort_cols[sort_by]
-        def _sort_key(o):
-            if _sk == "_display_name":
-                return display_name(o).lower()
-            v = o.get(_sk)
-            if v is None:
-                return "" if isinstance(v, str) or v is None else 0
-            return v if not isinstance(v, str) else v.lower()
-        filtered.sort(key=_sort_key, reverse=not sort_asc)
-
-        st.caption("Klikk en rad for å se detaljer og redigere.")
+        # Pre-compute status for sorting
         def _row_status(o):
             issues = []
             if not o.get("estimated_value_bl"):
@@ -1234,6 +1227,21 @@ with tab_collection:
             if not issues:
                 return "✅"
             return "⚠️ " + ", ".join(issues)
+
+        # Sort filtered list
+        _sk = sort_cols[sort_by]
+        def _sort_key(o):
+            if _sk == "_display_name":
+                return display_name(o).lower()
+            if _sk == "_status":
+                return _row_status(o)
+            v = o.get(_sk)
+            if v is None:
+                return "" if _sk not in ("year", "estimated_value_bl") else 0
+            return v if not isinstance(v, str) else v.lower()
+        filtered.sort(key=_sort_key, reverse=not sort_asc)
+
+        st.caption("Klikk en rad for å se detaljer og redigere.")
 
         rows = [{
             "Status":   _row_status(o),
