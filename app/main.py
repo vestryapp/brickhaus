@@ -759,10 +759,16 @@ def edit_dialog(obj: dict, loc_list: list):
     oid = obj.get("ownership_id", "")
     st.caption(f"**{oid}** · Registrert: {obj.get('registered_at', '–')}")
 
-    # Show BrickLink official name if available
+    # Show BrickLink official name and IDs
     bl_full = obj.get("name_bl")
     if bl_full:
         st.caption(f"🏷️ BrickLink: {html.unescape(bl_full)}")
+    sn = obj.get("set_number") or "–"
+    bl_no = obj.get("bl_item_no") or ""
+    id_line = f"📦 Settnr: **{sn}**"
+    if bl_no and bl_no != sn:
+        id_line += f"  ·  BL Item: **{bl_no}**"
+    st.caption(id_line)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -770,6 +776,8 @@ def edit_dialog(obj: dict, loc_list: list):
         name = st.text_input("Navn *", value=obj.get("name") or "",
                              disabled=not is_moc,
                              help="Navn kan kun redigeres for MOC og Mod. BL-navn vises automatisk i samlingsoversikten." if not is_moc else None)
+        set_number_edit = st.text_input("Settnummer", value=obj.get("set_number") or "",
+                                        help="Endre settnummer, f.eks. fra '8683' til '8683-3' for CMF-variant.")
         object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
                                    index=list(TYPE_LABEL.keys()).index(obj.get("object_type", "SET")),
                                    format_func=lambda x: TYPE_LABEL[x])
@@ -898,8 +906,11 @@ def edit_dialog(obj: dict, loc_list: list):
             loc_id = get_or_create_location(loc_name_used) if loc_name_used else None
             price     = float(purchase_price) if purchase_price else None
             total_nok = price if (price and purchase_currency == "NOK") else obj.get("total_cost_nok")
+            new_sn = set_number_edit.strip()
+            sn_changed = new_sn and new_sn != (obj.get("set_number") or "")
             updates = {
                 "name":              name.strip() if is_moc else obj.get("name"),
+                "set_number":        new_sn or obj.get("set_number"),
                 "object_type":       object_type,
                 "theme":             theme.strip() or None,
                 "subtheme":          subtheme.strip() or None,
@@ -920,6 +931,11 @@ def edit_dialog(obj: dict, loc_list: list):
                 "instructions_url":     instructions_url.strip() if instructions_url else None,
             }
             sb_patch("objects", {"ownership_id": f"eq.{oid}"}, updates)
+
+            # If set_number changed, clear stale BL data so it gets re-fetched
+            if sn_changed:
+                sb_patch("objects", {"ownership_id": f"eq.{oid}"},
+                         {"name_bl": None, "estimated_value_bl": None})
 
             # Upload new instruction file if provided
             if new_instr_file:
@@ -1114,8 +1130,21 @@ with tab_collection:
                      if o.get("set_number") and o["set_number"] in _CMF_BASES]
     if cmf_no_suffix:
         with st.expander(f"⚠️ {len(cmf_no_suffix)} CMF-figurer mangler variant-suffiks — kan ikke auto-prises"):
-            st.caption("Disse er registrert med bare basisnummer (f.eks. «8683» i stedet for «8683-3»). "
-                       "Klikk raden og endre settnummeret til riktig variant for å aktivere automatisk prising.")
+            st.caption("Disse er registrert med bare basisnummer (f.eks. «8683» i stedet for «8683-1»). "
+                       "Klikk knappen under for å legge til «-1» (forseglet random bag) på alle, "
+                       "eller klikk en rad for å sette riktig variant manuelt.")
+            if st.button(f"📦 Legg til -1 suffiks på {len(cmf_no_suffix)} CMF-er (random bag)",
+                         type="secondary",
+                         help="Setter settnummer til f.eks. 8683-1 for alle CMF uten suffiks. "
+                              "Dette gjør at de kan prises som forseglet random bag på BrickLink."):
+                for obj in cmf_no_suffix:
+                    new_sn = obj["set_number"] + "-1"
+                    sb_patch("objects",
+                             {"ownership_id": f"eq.{obj['ownership_id']}"},
+                             {"set_number": new_sn, "name_bl": None, "estimated_value_bl": None})
+                st.cache_data.clear()
+                st.success(f"✅ Oppdatert {len(cmf_no_suffix)} CMF-er til -1 suffiks")
+                st.rerun()
             for o in cmf_no_suffix:
                 st.caption(f"{o['ownership_id']} – {o.get('name', '–')} ({o['set_number']})")
 
@@ -1125,7 +1154,21 @@ with tab_collection:
         st.info("Ingen objekter matcher filteret.")
     else:
         st.caption("Klikk en rad for å se detaljer og redigere.")
+        def _row_status(o):
+            issues = []
+            if not o.get("estimated_value_bl"):
+                issues.append("pris")
+            if not o.get("name_bl"):
+                issues.append("BL-navn")
+            sn = o.get("set_number") or ""
+            if sn in _CMF_BASES:
+                issues.append("variant-suffiks")
+            if not issues:
+                return "✅"
+            return "⚠️ " + ", ".join(issues)
+
         rows = [{
+            "Status":   _row_status(o),
             "ID":       o.get("ownership_id", ""),
             "Type":     TYPE_LABEL.get(o.get("object_type", ""), ""),
             "Settnr.":  o.get("set_number") or "–",
@@ -1135,7 +1178,7 @@ with tab_collection:
             "Tilstand": CONDITION_LABEL.get(o.get("condition", ""), "–"),
             "Kvalitet": QUALITY_LABEL.get(o.get("quality_level", ""), "–"),
             "Lokasjon": o.get("location_name", "–"),
-            "Verdi":    fmt_nok(o.get("estimated_value_bl")) if o.get("estimated_value_bl") else "⚠️ Mangler",
+            "Verdi":    fmt_nok(o.get("estimated_value_bl")),
             "Kostpris": fmt_nok(o.get("total_cost_nok")),
             "Notater":  o.get("notes") or "",
         } for o in filtered]
@@ -1145,7 +1188,10 @@ with tab_collection:
             height=600,
             on_select="rerun",
             selection_mode="single-row",
-            column_config={"Notater": st.column_config.TextColumn(width="medium")},
+            column_config={
+                "Status": st.column_config.TextColumn(width="small"),
+                "Notater": st.column_config.TextColumn(width="medium"),
+            },
         )
         selected = event.selection.rows
         if selected:
