@@ -538,6 +538,19 @@ def rb_lookup(set_number: str) -> dict | None:
     except Exception:
         return None
 
+def rb_minifig_count(set_number: str) -> int:
+    """Fetch the number of minifigures in a set from Rebrickable."""
+    try:
+        r = requests.get(
+            f"https://rebrickable.com/api/v3/lego/sets/{set_number}/minifigs/",
+            headers=RB_HEADERS, timeout=8,
+        )
+        if not r.ok:
+            return 0
+        return r.json().get("count", 0)
+    except Exception:
+        return 0
+
 def rb_search_mocs(query: str) -> list:
     """Search Rebrickable community MOCs by name or MOC ID."""
     try:
@@ -778,6 +791,7 @@ def init_state():
         "rb_year":          date.today().year,
         "rb_img":           None,
         "rb_parts":         None,
+        "rb_minifigs":      None,
         "rb_status":        None,
         "reg_step":         1,
         "reg_set_number":   "",
@@ -800,7 +814,7 @@ def init_state():
 init_state()
 
 def reset_registration():
-    keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_status",
+    keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_minifigs","rb_status",
             "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants",
             "reg_saved","reg_ownership_id","reg_obj_uuid",
             "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results"]
@@ -892,9 +906,6 @@ def edit_dialog(obj: dict, loc_list: list):
         has_original_box = st.toggle("Har original boks",
                                       value=bool(obj.get("has_original_box")),
                                       key=f"has_box_{oid}")
-        is_built = st.toggle("Er bygget",
-                              value=bool(obj.get("is_built")),
-                              key=f"is_built_{oid}")
     with ic3:
         compl_keys = list(COMPLETENESS_LABEL.keys())
         cur_compl = obj.get("completeness_level") or "UNKNOWN"
@@ -934,7 +945,9 @@ def edit_dialog(obj: dict, loc_list: list):
         "Estimert verdi (NOK)",
         value=float(obj.get("estimated_value_bl") or 0),
         min_value=0.0, step=10.0,
-        help="Settes automatisk fra BrickLink, men kan overstyres manuelt",
+        help="Vektet gjennomsnittspris fra BrickLink — basert på faktiske salg "
+             "og aktive annonser i tilsvarende tilstand. Oppdateres automatisk "
+             "hver måned. Du kan overstyre manuelt ved behov.",
     )
 
     # ── MOC / MOD-spesifikke felt ─────────────────────────────────────────────
@@ -1031,7 +1044,7 @@ def edit_dialog(obj: dict, loc_list: list):
                 "num_minifigs":         int(num_minifigs) if num_minifigs else None,
                 "has_instructions":     has_instructions,
                 "has_original_box":     has_original_box,
-                "is_built":             is_built,
+                "is_built":             condition in ("BUILT", "USED"),
                 "completeness_level":   completeness,
                 "moc_base_set":         moc_base_set.strip() if moc_base_set else None,
                 "rebrickable_moc_id":   rebrickable_moc_id.strip() if rebrickable_moc_id else None,
@@ -1314,6 +1327,7 @@ with tab_register:
             st.session_state["rb_year"]     = data.get("year", date.today().year)
             st.session_state["rb_img"]      = data.get("set_img_url")
             st.session_state["rb_parts"]    = data.get("num_parts")
+            st.session_state["rb_minifigs"] = rb_minifig_count(data.get("set_num", ""))
             st.session_state["rb_status"]   = "found"
             st.session_state["rb_variants"] = None
             st.session_state["reg_step"]    = 2
@@ -1659,6 +1673,9 @@ with tab_register:
                         "year":        int(year),
                         "condition":   condition,
                         "notes":       notes.strip() or None,
+                        "num_parts":   st.session_state.get("rb_parts"),
+                        "num_minifigs": st.session_state.get("rb_minifigs"),
+                        "is_built":    condition in ("BUILT", "USED"),
                     }
                     st.session_state["reg_step"] = 3
                     st.rerun()
