@@ -54,7 +54,7 @@ def fetch_all_sets():
             r = requests.get(
                 f"{SUPABASE_URL}/rest/v1/objects",
                 headers={**SB_HEADERS, "Range": f"{offset}-{offset+limit-1}"},
-                params={"select": "ownership_id,set_number,condition,object_type,name",
+                params={"select": "ownership_id,set_number,bl_item_no,condition,object_type,name",
                         "object_type": f"eq.{obj_type}",
                         "set_number": "not.is.null"},
             )
@@ -220,23 +220,33 @@ def _rb_bl_minifig_id(set_number: str, expected_name: str = "") -> str | None:
 
 
 def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
-                 name: str = "") -> tuple[float | None, str | None]:
+                 name: str = "", bl_item_no: str = "") -> tuple[float | None, str | None]:
     """
     Fetch BrickLink price (NOK) and official BL name.
 
     Returns (price, bl_name) tuple. Either or both may be None.
 
     Lookup strategy:
+      0. If bl_item_no is a col* ID → direct MINIFIG lookup (fastest, most reliable)
       1. MINIFIG object_type or CMF variant (suffix > 1): look up as MINIFIG via Rebrickable
       2. SET: try BrickLink SET type with base number
       3. GEAR fallback: keychains, accessories and GWP items BL lists as GEAR not SET
     """
+    # ── Direct bl_item_no lookup ─────────────────────────────────────────────
+    if bl_item_no and bl_item_no.startswith("col"):
+        price = _weighted_price(
+            _fetch_raw("MINIFIG", bl_item_no, condition, "sold"),
+            _fetch_raw("MINIFIG", bl_item_no, condition, "stock"),
+        )
+        bl_name = _fetch_bl_name("MINIFIG", bl_item_no)
+        if price:
+            return price, bl_name
+        return None, bl_name
+
     base, _, suffix = set_number.partition("-")
     is_cmf = suffix.isdigit() and int(suffix) > 1
 
     # ── MINIFIG / CMF path ────────────────────────────────────────────────────
-    # CMF variants (suffix > 1) must be priced as MINIFIG via Rebrickable BL ID.
-    # Do NOT fall through to SET price — that would return the full series price.
     if object_type == "MINIFIG" or is_cmf:
         fig_id = _rb_bl_minifig_id(set_number, name)
         if fig_id:
@@ -247,11 +257,22 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
             bl_name = _fetch_bl_name("MINIFIG", fig_id)
             if price:
                 return price, bl_name
-        return None, None  # No BL MINIFIG ID found — better no price than wrong price
+        return None, None
+
+    # ── Direct bl_item_no for SET/GEAR ───────────────────────────────────────
+    if bl_item_no and bl_item_no != set_number:
+        bl_base = bl_item_no.split("-")[0]
+        for item_type in ("SET", "GEAR"):
+            for item_id in (bl_item_no, bl_base):
+                price = _weighted_price(
+                    _fetch_raw(item_type, item_id, condition, "sold"),
+                    _fetch_raw(item_type, item_id, condition, "stock"),
+                )
+                if price:
+                    bl_name = _fetch_bl_name(item_type, item_id)
+                    return price, bl_name
 
     # ── SET path ──────────────────────────────────────────────────────────────
-    # Try base number first (BrickLink standard), then with "-1" suffix.
-    # Some sets (polybags, older sets) are only found with the revision suffix.
     for item_id in (base, f"{base}-1"):
         price = _weighted_price(
             _fetch_raw("SET", item_id, condition, "sold"),
@@ -261,7 +282,7 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
             bl_name = _fetch_bl_name("SET", item_id)
             return price, bl_name
 
-    # ── GEAR fallback (keychains, accessories, GWP items) ────────────────────
+    # ── GEAR fallback ────────────────────────────────────────────────────────
     price = _weighted_price(
         _fetch_raw("GEAR", base, condition, "sold"),
         _fetch_raw("GEAR", base, condition, "stock"),
@@ -291,6 +312,7 @@ if __name__ == "__main__":
         price, bl_name = bl_get_price(
             obj["set_number"], obj.get("condition", "USED"),
             obj.get("object_type", "SET"), obj.get("name", ""),
+            obj.get("bl_item_no", ""),
         )
         patch = {}
         if price:

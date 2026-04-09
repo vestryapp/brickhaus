@@ -360,19 +360,32 @@ def _rb_get_bl_minifig_id(set_number: str, expected_name: str = "") -> str | Non
 
 
 def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
-                 name: str = "") -> tuple[float | None, str | None]:
+                 name: str = "", bl_item_no: str = "") -> tuple[float | None, str | None]:
     """
     Fetch BrickLink price (NOK) and official BL name.
 
     Returns (price, bl_name) tuple. Either or both may be None.
 
     Lookup strategy:
+      0. If bl_item_no is a col* ID → direct MINIFIG lookup (fastest, most reliable)
       1. MINIFIG object_type or CMF variant (suffix > 1): look up as MINIFIG via Rebrickable
       2. SET: try BrickLink SET type with base number
       3. GEAR fallback: keychains, accessories and GWP items that BL lists as GEAR not SET
     """
     if not BL_CONSUMER_KEY:
         return None, None
+
+    # ── Direct bl_item_no lookup (from Excel import or manual entry) ─────────
+    # If we have a col* ID from BrickLink, use it directly — no Rebrickable needed.
+    if bl_item_no and bl_item_no.startswith("col"):
+        price = _weighted_price(
+            _bl_fetch_raw("MINIFIG", bl_item_no, condition, "sold"),
+            _bl_fetch_raw("MINIFIG", bl_item_no, condition, "stock"),
+        )
+        bl_name = _fetch_bl_name("MINIFIG", bl_item_no)
+        if price:
+            return price, bl_name
+        return None, bl_name  # return name even if no price data
 
     base, _, suffix = set_number.partition("-")
     is_cmf_variant = suffix.isdigit() and int(suffix) > 1
@@ -392,9 +405,21 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
                 return price, bl_name
         return None, None  # No BL MINIFIG ID found — better no price than wrong price
 
+    # ── Direct bl_item_no for SET/GEAR (if different from set_number) ────────
+    if bl_item_no and bl_item_no != set_number:
+        bl_base = bl_item_no.split("-")[0]
+        for item_type in ("SET", "GEAR"):
+            for item_id in (bl_item_no, bl_base):
+                price = _weighted_price(
+                    _bl_fetch_raw(item_type, item_id, condition, "sold"),
+                    _bl_fetch_raw(item_type, item_id, condition, "stock"),
+                )
+                if price:
+                    bl_name = _fetch_bl_name(item_type, item_id)
+                    return price, bl_name
+
     # ── SET path ──────────────────────────────────────────────────────────────
     # Try base number first (BrickLink standard), then with "-1" suffix.
-    # Some sets (polybags, older sets) are only found with the revision suffix.
     for item_id in (base, f"{base}-1"):
         price = _weighted_price(
             _bl_fetch_raw("SET", item_id, condition, "sold"),
@@ -500,7 +525,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "id,ownership_id,object_type,set_number,name,name_bl,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
+            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
         )
         chunk = r.json()
         if not chunk:
@@ -976,7 +1001,7 @@ with tab_collection:
                 progress = st.progress(0, text="Henter priser ...")
                 updated, no_data = 0, []
                 for i, obj in enumerate(missing_price):
-                    price, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""))
+                    price, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"), obj.get("object_type", "SET"), obj.get("name", ""), obj.get("bl_item_no", ""))
                     if price or bl_name:
                         patch = {"valuation_date": str(date.today())}
                         if price:
@@ -1016,7 +1041,7 @@ with tab_collection:
                 names_ok, names_fail = 0, 0
                 for i, obj in enumerate(missing_bl_name):
                     _, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"),
-                                              obj.get("object_type", "SET"), obj.get("name", ""))
+                                              obj.get("object_type", "SET"), obj.get("name", ""), obj.get("bl_item_no", ""))
                     if bl_name:
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
