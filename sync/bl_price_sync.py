@@ -235,30 +235,30 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
       3. GEAR fallback: keychains, accessories and GWP items BL lists as GEAR not SET
     """
     # ── Direct bl_item_no lookup ─────────────────────────────────────────────
-    # bl_item_no is the authoritative BrickLink ID when set.
+    # bl_item_no is the authoritative BrickLink ID. Auto-detect item type.
     if bl_item_no:
-        if bl_item_no.startswith("col"):
-            price = _weighted_price(
-                _fetch_raw("SET", bl_item_no, condition, "sold"),
-                _fetch_raw("SET", bl_item_no, condition, "stock"),
-            )
-            bl_name = _fetch_bl_name("SET", bl_item_no)
-            if price:
+        _bl_id = bl_item_no.lower()
+        if _bl_id.startswith("col"):
+            type_order = ["SET"]
+        elif any(_bl_id.startswith(p) for p in (
+            "cty", "sw", "hp", "sh", "njo", "tlm", "twn", "gen", "fig",
+            "idea", "pi", "cas", "adv", "alp", "pha", "poc", "lor",
+        )):
+            type_order = ["MINIFIG", "SET", "GEAR"]
+        elif any(c.isalpha() for c in _bl_id.split("-")[0][-3:]):
+            type_order = ["PART", "GEAR", "MINIFIG", "SET"]
+        else:
+            type_order = ["SET", "GEAR", "MINIFIG", "PART"]
+
+        for item_type in type_order:
+            bl_name = _fetch_bl_name(item_type, bl_item_no)
+            if bl_name is not None:
+                price = _weighted_price(
+                    _fetch_raw(item_type, bl_item_no, condition, "sold"),
+                    _fetch_raw(item_type, bl_item_no, condition, "stock"),
+                )
                 return price, bl_name
-            return None, bl_name
-        elif bl_item_no != set_number:
-            bl_base = bl_item_no.split("-")[0]
-            for item_type in ("SET", "GEAR"):
-                for item_id in (bl_item_no, bl_base):
-                    price = _weighted_price(
-                        _fetch_raw(item_type, item_id, condition, "sold"),
-                        _fetch_raw(item_type, item_id, condition, "stock"),
-                    )
-                    bl_name_candidate = _fetch_bl_name(item_type, item_id)
-                    if price:
-                        return price, bl_name_candidate
-            bl_name = _fetch_bl_name("SET", bl_item_no)
-            return None, bl_name
+        return None, None
 
     base, _, suffix = set_number.partition("-")
     is_cmf = suffix.isdigit() and int(suffix) > 1

@@ -378,33 +378,33 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
         return None, None
 
     # ── Direct bl_item_no lookup (from Excel import or manual entry) ─────────
-    # bl_item_no is the authoritative BrickLink ID when it differs from set_number.
-    # col*-IDs are SET type on BrickLink; other bl_item_no values try SET then GEAR.
+    # bl_item_no is the authoritative BrickLink ID. Determine the BL item type
+    # from the ID prefix, or try all types as fallback.
     if bl_item_no:
-        if bl_item_no.startswith("col"):
-            # col*-IDs are SET type on BrickLink (figure + stand + accessories)
-            price = _weighted_price(
-                _bl_fetch_raw("SET", bl_item_no, condition, "sold"),
-                _bl_fetch_raw("SET", bl_item_no, condition, "stock"),
-            )
-            bl_name = _fetch_bl_name("SET", bl_item_no)
-            if price:
+        # Determine likely BL types from ID prefix
+        _bl_id = bl_item_no.lower()
+        if _bl_id.startswith("col"):
+            type_order = ["SET"]                          # col* = CMF sets
+        elif any(_bl_id.startswith(p) for p in (
+            "cty", "sw", "hp", "sh", "njo", "tlm", "twn", "gen", "fig",
+            "idea", "pi", "cas", "adv", "alp", "pha", "poc", "lor",
+        )):
+            type_order = ["MINIFIG", "SET", "GEAR"]       # minifig prefixes
+        elif any(c.isalpha() for c in _bl_id.split("-")[0][-3:]):
+            type_order = ["PART", "GEAR", "MINIFIG", "SET"]  # likely a part ID
+        else:
+            type_order = ["SET", "GEAR", "MINIFIG", "PART"]  # numeric = probably set
+
+        for item_type in type_order:
+            bl_name = _fetch_bl_name(item_type, bl_item_no)
+            if bl_name is not None:
+                # Found the right type — now get price
+                price = _weighted_price(
+                    _bl_fetch_raw(item_type, bl_item_no, condition, "sold"),
+                    _bl_fetch_raw(item_type, bl_item_no, condition, "stock"),
+                )
                 return price, bl_name
-            return None, bl_name
-        elif bl_item_no != set_number:
-            # Non-col bl_item_no — try SET, then GEAR
-            bl_base = bl_item_no.split("-")[0]
-            for item_type in ("SET", "GEAR"):
-                for item_id in (bl_item_no, bl_base):
-                    price = _weighted_price(
-                        _bl_fetch_raw(item_type, item_id, condition, "sold"),
-                        _bl_fetch_raw(item_type, item_id, condition, "stock"),
-                    )
-                    bl_name_candidate = _fetch_bl_name(item_type, item_id)
-                    if price:
-                        return price, bl_name_candidate
-            bl_name = _fetch_bl_name("SET", bl_item_no)
-            return None, bl_name
+        return None, None  # bl_item_no given but not found on BrickLink
 
     base, _, suffix = set_number.partition("-")
     is_cmf_variant = suffix.isdigit() and int(suffix) > 1
@@ -1032,8 +1032,8 @@ with tab_collection:
     # Full refresh of all existing prices runs via the monthly Railway cron job.
     if BL_CONSUMER_KEY:
         missing_price = [o for o in objects
-                         if o.get("object_type") in ("SET", "MINIFIG")
-                         and o.get("set_number")
+                         if o.get("object_type") in ("SET", "MINIFIG", "PART")
+                         and (o.get("set_number") or o.get("bl_item_no"))
                          and not o.get("estimated_value_bl")]
         if missing_price:
             st.caption(f"⚠️ {len(missing_price)} sett mangler pris — klikk raden for å sette manuelt, eller hent automatisk")
@@ -1072,8 +1072,8 @@ with tab_collection:
     # BrickLink name backfill — fetch official BL names for objects that don't have one yet
     if BL_CONSUMER_KEY:
         missing_bl_name = [o for o in objects
-                           if o.get("object_type") in ("SET", "MINIFIG")
-                           and o.get("set_number")
+                           if o.get("object_type") in ("SET", "MINIFIG", "PART")
+                           and (o.get("set_number") or o.get("bl_item_no"))
                            and not o.get("name_bl")]
         if missing_bl_name:
             if st.button(f"🏷️ Hent BrickLink-navn for {len(missing_bl_name)} objekter", type="secondary",
