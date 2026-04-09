@@ -716,6 +716,8 @@ def display_name(obj: dict) -> str:
 
 def init_state():
     defaults = {
+        "sort_by":          "ID",
+        "sort_asc":         True,
         "rb_name":          "",
         "rb_theme":         "",
         "rb_subtheme":      "",
@@ -1184,6 +1186,35 @@ with tab_collection:
     if not filtered:
         st.info("Ingen objekter matcher filteret.")
     else:
+        # Persistent sort controls
+        sort_cols = {
+            "ID": "ownership_id", "Settnr.": "set_number", "Navn": "_display_name",
+            "Tema": "theme", "År": "year", "Verdi": "estimated_value_bl",
+            "Tilstand": "condition", "Lokasjon": "location_name",
+        }
+        scol1, scol2 = st.columns([3, 1])
+        with scol1:
+            sort_by = st.selectbox("Sorter etter", list(sort_cols.keys()),
+                                   index=list(sort_cols.keys()).index(
+                                       st.session_state.get("sort_by", "ID")),
+                                   key="sort_by_select")
+        with scol2:
+            sort_asc = st.toggle("Stigende", value=st.session_state.get("sort_asc", True),
+                                 key="sort_asc_toggle")
+        st.session_state["sort_by"] = sort_by
+        st.session_state["sort_asc"] = sort_asc
+
+        # Sort filtered list
+        _sk = sort_cols[sort_by]
+        def _sort_key(o):
+            if _sk == "_display_name":
+                return display_name(o).lower()
+            v = o.get(_sk)
+            if v is None:
+                return "" if isinstance(v, str) or v is None else 0
+            return v if not isinstance(v, str) else v.lower()
+        filtered.sort(key=_sort_key, reverse=not sort_asc)
+
         st.caption("Klikk en rad for å se detaljer og redigere.")
         def _row_status(o):
             issues = []
