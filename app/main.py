@@ -1075,7 +1075,20 @@ with tab_collection:
                 details = []
                 for i, obj in enumerate(stale_cmf):
                     col_id = obj["bl_item_no"]
-                    bl_name = _fetch_bl_name("MINIFIG", col_id)
+                    # Debug: fetch with full error info
+                    try:
+                        url = f"https://api.bricklink.com/api/store/v1/items/MINIFIG/{col_id}"
+                        r = requests.get(url, auth=_bl_auth(), timeout=8)
+                        if r.ok:
+                            bl_name = r.json().get("data", {}).get("name")
+                            if bl_name:
+                                bl_name = html.unescape(bl_name)
+                        else:
+                            bl_name = None
+                        debug = f"HTTP {r.status_code}: {r.text[:200]}"
+                    except Exception as e:
+                        bl_name = None
+                        debug = f"Exception: {e}"
                     if bl_name and "Complete Random Set" not in bl_name:
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
@@ -1084,7 +1097,7 @@ with tab_collection:
                         details.append(f"✅ {col_id} → {bl_name}")
                     else:
                         fail += 1
-                        details.append(f"❌ {col_id} → {bl_name or 'ingen svar'}")
+                        details.append(f"❌ {col_id} → {debug}")
                     progress.progress((i + 1) / len(stale_cmf),
                                       text=f"Oppdaterer {i+1}/{len(stale_cmf)} ...")
                 progress.empty()
