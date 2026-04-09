@@ -1003,6 +1003,35 @@ with tab_collection:
                             st.caption(s)
                 st.rerun()
 
+    # BrickLink name backfill — fetch official BL names for objects that don't have one yet
+    if BL_CONSUMER_KEY:
+        missing_bl_name = [o for o in objects
+                           if o.get("object_type") in ("SET", "MINIFIG")
+                           and o.get("set_number")
+                           and not o.get("name_bl")]
+        if missing_bl_name:
+            if st.button(f"🏷️ Hent BrickLink-navn for {len(missing_bl_name)} objekter", type="secondary",
+                         help="Henter offisielle BrickLink-navn for objekter som mangler dette."):
+                progress = st.progress(0, text="Henter navn ...")
+                names_ok, names_fail = 0, 0
+                for i, obj in enumerate(missing_bl_name):
+                    _, bl_name = bl_get_price(obj["set_number"], obj.get("condition", "USED"),
+                                              obj.get("object_type", "SET"), obj.get("name", ""))
+                    if bl_name:
+                        sb_patch("objects",
+                                 {"ownership_id": f"eq.{obj['ownership_id']}"},
+                                 {"name_bl": bl_name})
+                        names_ok += 1
+                    else:
+                        names_fail += 1
+                    progress.progress((i + 1) / len(missing_bl_name),
+                                      text=f"Henter {i+1}/{len(missing_bl_name)} ...")
+                progress.empty()
+                st.cache_data.clear()
+                st.success(f"✅ Hentet navn for {names_ok} objekter"
+                           + (f" ({names_fail} ikke funnet)" if names_fail else ""))
+                st.rerun()
+
     # Flag CMF figures registered without variant suffix — these can't be auto-priced
     _cmf_bases = {"8683","8684","8803","8804","8805","8827","8831","8833",
                   "71000","71001","71002","71004","71007","71008","71011","71013",
