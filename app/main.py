@@ -1072,22 +1072,32 @@ with tab_collection:
                          help="Disse har generisk serie-navn i stedet for figurnavn. Klikk for å hente riktig navn via col*-ID."):
                 progress = st.progress(0, text="Oppdaterer CMF-navn ...")
                 ok, fail = 0, 0
+                details = []
                 for i, obj in enumerate(stale_cmf):
-                    bl_name = _fetch_bl_name("MINIFIG", obj["bl_item_no"])
-                    if bl_name:
+                    col_id = obj["bl_item_no"]
+                    bl_name = _fetch_bl_name("MINIFIG", col_id)
+                    if bl_name and "Complete Random Set" not in bl_name:
                         sb_patch("objects",
                                  {"ownership_id": f"eq.{obj['ownership_id']}"},
                                  {"name_bl": bl_name})
                         ok += 1
+                        details.append(f"✅ {col_id} → {bl_name}")
                     else:
                         fail += 1
+                        details.append(f"❌ {col_id} → {bl_name or 'ingen svar'}")
                     progress.progress((i + 1) / len(stale_cmf),
                                       text=f"Oppdaterer {i+1}/{len(stale_cmf)} ...")
                 progress.empty()
                 st.cache_data.clear()
-                st.success(f"✅ Oppdatert navn for {ok} CMF-figurer"
-                           + (f" ({fail} ikke funnet)" if fail else ""))
-                st.rerun()
+                if ok:
+                    st.success(f"✅ Oppdatert navn for {ok} CMF-figurer")
+                if fail:
+                    st.warning(f"⚠️ {fail} figurer fikk ikke riktig navn")
+                with st.expander("Detaljer"):
+                    for d in details:
+                        st.caption(d)
+                if ok:
+                    st.rerun()
 
     # Flag CMF figures registered without variant suffix — these can't be auto-priced
     _cmf_bases = {"8683","8684","8803","8804","8805","8827","8831","8833",
