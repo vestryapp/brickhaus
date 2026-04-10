@@ -812,6 +812,7 @@ def init_state():
         "reg_ai_result":     None,
         "moc_prefill":       None,
         "moc_rb_results":    None,
+        "last_shown_oid":    None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1303,10 +1304,16 @@ with tab_collection:
             if selected:
                 obj = filtered[selected[0]]
                 obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
-                edit_dialog(obj, loc_list)
+                _oid = obj.get("ownership_id")
+                if st.session_state.get("last_shown_oid") != _oid:
+                    st.session_state["last_shown_oid"] = _oid
+                    edit_dialog(obj, loc_list)
+            else:
+                st.session_state["last_shown_oid"] = None
         else:
             # ── Accordion grouping ───────────────────────────────────────
             from collections import OrderedDict
+            _any_selected = False
             groups = OrderedDict()
             for o in filtered:
                 key = o.get(group_field) or "– Ukjent –"
@@ -1348,9 +1355,16 @@ with tab_collection:
                     )
                     selected = event.selection.rows
                     if selected:
+                        _any_selected = True
                         obj = grp_objs[selected[0]]
                         obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
-                        edit_dialog(obj, loc_list)
+                        _oid = obj.get("ownership_id")
+                        if st.session_state.get("last_shown_oid") != _oid:
+                            st.session_state["last_shown_oid"] = _oid
+                            edit_dialog(obj, loc_list)
+
+            if not _any_selected:
+                st.session_state["last_shown_oid"] = None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
