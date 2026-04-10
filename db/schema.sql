@@ -19,6 +19,12 @@ create type condition_type as enum (
   'SEALED', 'OPENED', 'USED', 'INCOMPLETE'
 );
 
+-- Per-unit slitasjegrad (collector grading). NULL for sealed/ubrukt.
+-- Added in db/migration_wear_level.sql.
+create type wear_level as enum (
+  'MINT', 'NEAR_MINT', 'VERY_GOOD', 'GOOD', 'FAIR'
+);
+
 create type quality_level as enum (
   'BASIC', 'DOCUMENTED', 'VERIFIED'
 );
@@ -71,6 +77,7 @@ create table objects (
 
   -- Condition & status
   condition             condition_type not null default 'OPENED',
+  wear_level            wear_level,                    -- collector grading, NULL for sealed
   seal_status           text,
   box_condition         text,
   set_condition         text,

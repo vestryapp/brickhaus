@@ -57,8 +57,8 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
     Returns: {"set_number": str|None, "name": str|None, "confidence": "high"|"medium"|"low", "note": str}
     """
     if not ANTHROPIC_API_KEY:
-        return {"set_number": None, "name": None, "confidence": "low",
-                "note": "ANTHROPIC_API_KEY ikke satt."}
+        return {"set_number": None, "name": None, "wear_level": None,
+                "wear_note": None, "note": "ANTHROPIC_API_KEY ikke satt."}
     try:
         small_bytes, media_type = _resize_image(image_bytes, content_type)
         img_b64 = base64.standard_b64encode(small_bytes).decode("utf-8")
@@ -66,7 +66,7 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",  # Haiku: ~12× billigere enn Sonnet, tilstrekkelig for settgjenkjenning
-            max_tokens=128,                      # Vi trenger bare et lite JSON-svar
+            max_tokens=200,                      # Litt større siden vi nå også vurderer slitasje
             messages=[{
                 "role": "user",
                 "content": [
@@ -77,13 +77,22 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
                     {
                         "type": "text",
                         "text": (
-                            "Du er ekspert på Lego-sett. Se på dette bildet – det kan vise en Lego-eske "
-                            "eller et ferdig bygget Lego-sett.\n\n"
-                            "Identifiser settnummeret hvis mulig. Svar KUN med et JSON-objekt, ingen annen tekst:\n"
-                            '{"set_number": "75192", "name": "Millennium Falcon", "confidence": "high"}\n\n'
-                            "Confidence-verdier: \"high\" (sikker), \"medium\" (trolig riktig), \"low\" (usikker).\n"
-                            "Hvis du ikke kan identifisere settet, bruk null for set_number og name, og \"low\" for confidence.\n"
-                            "Sett-nummeret skal kun inneholde tall og bindestrek, f.eks. \"75192\" eller \"71011-8\"."
+                            "Du er ekspert på Lego-sett. Se på dette bildet – det kan vise en "
+                            "Lego-eske, en åpen ubygget pakke, eller et ferdig bygget sett.\n\n"
+                            "Gjør to vurderinger:\n"
+                            "1. Identifiser settnummeret hvis mulig.\n"
+                            "2. Anslå slitasjegrad ut fra det du ser (støv, riper, mangler, "
+                            "esketilstand, klistremerker). Bare for åpne/byggede sett — "
+                            "for forseglede esker, returner null.\n\n"
+                            "Svar KUN med et JSON-objekt, ingen annen tekst:\n"
+                            '{"set_number": "75192", "name": "Millennium Falcon", '
+                            '"wear_level": "NEAR_MINT", "wear_note": "Lett støv, ellers ren"}\n\n'
+                            "Sett-nummeret skal kun inneholde tall og bindestrek, "
+                            "f.eks. \"75192\" eller \"71011-8\".\n"
+                            "wear_level: én av MINT, NEAR_MINT, VERY_GOOD, GOOD, FAIR — eller null "
+                            "hvis bildet ikke gir grunnlag (forseglet eske, dårlig vinkel).\n"
+                            "wear_note: kort begrunnelse på norsk (maks 60 tegn) eller null.\n"
+                            "Hvis du ikke kan identifisere settet, bruk null for set_number og name."
                         ),
                     },
                 ],
@@ -99,15 +108,16 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
         return {
             "set_number":  result.get("set_number"),
             "name":        result.get("name"),
-            "confidence":  result.get("confidence", "low"),
+            "wear_level":  result.get("wear_level"),
+            "wear_note":   result.get("wear_note"),
             "note":        "",
         }
     except json.JSONDecodeError:
-        return {"set_number": None, "name": None, "confidence": "low",
-                "note": "Kunne ikke tolke svar fra AI."}
+        return {"set_number": None, "name": None, "wear_level": None,
+                "wear_note": None, "note": "Kunne ikke tolke svar fra AI."}
     except Exception as e:
-        return {"set_number": None, "name": None, "confidence": "low",
-                "note": f"Feil: {e}"}
+        return {"set_number": None, "name": None, "wear_level": None,
+                "wear_note": None, "note": f"Feil: {e}"}
 
 SB_HEADERS = {
     "apikey":        SUPABASE_KEY,
@@ -652,7 +662,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,num_minifigs,is_built,has_instructions,has_original_box,completeness_level,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
+            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,wear_level,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,num_minifigs,is_built,has_instructions,has_original_box,completeness_level,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
         )
         chunk = r.json()
         if not chunk:
@@ -799,6 +809,18 @@ CONDITION_LABEL = {
     "USED":       "🔧 Brukt",
     "INCOMPLETE": "⚠️ Ufullstendig",
 }
+
+# Per-unit slitasjegrad (BL-inspirert collector grading).
+# Brukes for OPENED/BUILT/USED/INCOMPLETE — ikke meningsfullt for SEALED.
+WEAR_LABEL = {
+    "MINT":      "✨ Som ny",
+    "NEAR_MINT": "🌟 Nesten som ny",
+    "VERY_GOOD": "👍 Meget god",
+    "GOOD":      "👌 God",
+    "FAIR":      "🔧 Akseptabel",
+}
+# Conditions where wear_level matters (not sealed)
+_WEAR_RELEVANT_CONDITIONS = {"OPENED", "BUILT", "USED", "INCOMPLETE"}
 DOK_LABEL = {
     "BASIC":      "⚪ Registrert",
     "DOCUMENTED": "🔵 Dokumentert",
@@ -894,6 +916,8 @@ def init_state():
         "reg_doc_img_saved":  False,     # tracks whether documentation image was saved in step 5
         "reg_last_img_file_id":  None,    # prevents re-running identification on rerun
         "reg_condition":        None,    # segmented control state for Tilstand
+        "reg_wear_level":       None,    # segmented control state for slitasje
+        "bl_name_secondary":    None,    # BL official name shown as caption when != name
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -907,7 +931,8 @@ def reset_registration():
             "reg_saved","reg_ownership_id","reg_obj_uuid",
             "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results",
             "reg_uploaded_img_bytes","reg_uploaded_img_type",
-            "reg_last_img_file_id","reg_condition"]
+            "reg_last_img_file_id","reg_condition","reg_wear_level",
+            "bl_name_secondary"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -967,6 +992,23 @@ def edit_dialog(obj: dict, loc_list: list):
         condition = st.selectbox("Tilstand", cond_keys,
                                  index=cond_idx,
                                  format_func=lambda x: CONDITION_LABEL[x])
+
+        # Slitasjegrad (collector grading) — only meaningful for non-sealed
+        if condition in _WEAR_RELEVANT_CONDITIONS:
+            wear_keys = ["(ingen)"] + list(WEAR_LABEL.keys())
+            cur_wear  = obj.get("wear_level")
+            wear_idx  = wear_keys.index(cur_wear) if cur_wear in wear_keys else 0
+            wear_pick = st.selectbox(
+                "Slitasjegrad",
+                wear_keys,
+                index=wear_idx,
+                format_func=lambda x: WEAR_LABEL[x] if x in WEAR_LABEL else "– Ikke satt –",
+                help="Per-unit slitasjegrad for brukte sett. Fra 'Som ny' til 'Akseptabel'.",
+            )
+            wear_level_val = wear_pick if wear_pick in WEAR_LABEL else None
+        else:
+            wear_level_val = None
+
         status_keys = list(STATUS_LABEL.keys())
         cur_status = obj.get("status", "OWNED")
         status_idx = status_keys.index(cur_status) if cur_status in status_keys else 0
@@ -1125,6 +1167,7 @@ def edit_dialog(obj: dict, loc_list: list):
                 "subtheme":          subtheme.strip() or None,
                 "year":              int(year),
                 "condition":         condition,
+                "wear_level":        wear_level_val,
                 "status":            obj_status,
                 "location_id":       loc_id,
                 "sub_location":      sub_loc.strip() or None,
@@ -1497,12 +1540,19 @@ with tab_register:
             st.session_state["rb_status"]   = "found"
             st.session_state["rb_variants"] = None
 
-            # Overlay BrickLink (authoritative — owned by LEGO) on top of
-            # Rebrickable. BL wins for name/theme/subtheme when available.
+            # Overlay BrickLink on top of Rebrickable. BL is authoritative
+            # for theme/subtheme (BL is owned by LEGO and the catalog
+            # hierarchy is the source of truth). For NAME we keep RB as
+            # primary (collectors recognise "40 Years of LEGO Trains" more
+            # than BL's "Steam Engine {Reissue of Set 7810}") and store
+            # the BL official name as a secondary caption.
             bl_meta = bl_fetch_set_metadata(data.get("set_num", ""))
+            st.session_state["bl_name_secondary"] = None
             if bl_meta:
-                if bl_meta.get("name"):
-                    st.session_state["rb_name"] = bl_meta["name"]
+                bl_n = (bl_meta.get("name") or "").strip()
+                rb_n = (st.session_state.get("rb_name") or "").strip()
+                if bl_n and bl_n != rb_n:
+                    st.session_state["bl_name_secondary"] = bl_n
                 if bl_meta.get("theme"):
                     st.session_state["rb_theme"] = bl_meta["theme"]
                 if bl_meta.get("subtheme"):
@@ -1555,12 +1605,11 @@ with tab_register:
 
         # ── Image path ────────────────────────────────────────────────────────
         elif input_mode == "image":
-            st.subheader("📷 Identifiser med bilde")
-            st.caption("Last opp bilde av eske eller ferdig bygget sett")
-
             ai_result = st.session_state.get("reg_ai_result")
 
             if ai_result is None:
+                st.subheader("📷 Identifiser med bilde")
+                st.caption("Last opp bilde av eske eller ferdig bygget sett")
                 img_file = st.file_uploader(
                     "Velg bilde",
                     type=["jpg", "jpeg", "png", "webp"],
@@ -1580,6 +1629,11 @@ with tab_register:
                         with st.spinner("Analyserer bilde ..."):
                             result = identify_lego_from_image(img_bytes, img_file.type)
                         st.session_state["reg_ai_result"] = result
+                        # Pre-fill wear_level from AI vision so user sees a
+                        # suggestion in step 2 (still required to confirm).
+                        ai_wear = result.get("wear_level")
+                        if ai_wear in WEAR_LABEL:
+                            st.session_state["reg_wear_level"] = ai_wear
                         # Pre-fetch Rebrickable reference image for visual
                         # side-by-side verification on next render.
                         sett = result.get("set_number")
@@ -1859,6 +1913,11 @@ with tab_register:
         object_type = st.selectbox("Type", list(TYPE_LABEL.keys()),
                                    format_func=lambda x: TYPE_LABEL[x])
         name        = st.text_input("Navn *", value=st.session_state["rb_name"])
+        # Show BL official name as a secondary caption when it differs
+        # from the (collector-friendly) RB name. Saved as `name_bl`.
+        _bl_secondary = st.session_state.get("bl_name_secondary")
+        if _bl_secondary:
+            st.caption(f"🏷️ BrickLink offisielt: *{_bl_secondary}*")
         theme       = st.text_input("Tema",   value=st.session_state["rb_theme"])
         subtheme    = st.text_input("Subtema", value=st.session_state["rb_subtheme"])
         year        = st.number_input("År", min_value=1949, max_value=2030,
@@ -1896,6 +1955,52 @@ with tab_register:
             # segmented_control returns the selection directly;
             # persist it so it survives reruns and can drive validation.
             st.session_state["reg_condition"] = condition
+
+        # ── Slitasjegrad (collector grading) ───────────────────────────
+        # Only meaningful for non-sealed conditions. Hide for SEALED.
+        wear_level: str | None = None
+        if condition in _WEAR_RELEVANT_CONDITIONS:
+            st.markdown("**Slitasjegrad**")
+            # Show AI suggestion note if pre-filled from photo flow
+            _ai = st.session_state.get("reg_ai_result") or {}
+            _ai_wear = _ai.get("wear_level")
+            _ai_note = _ai.get("wear_note")
+            if _ai_wear and _ai_wear in WEAR_LABEL:
+                _msg = f"💡 AI-forslag fra bildet: **{WEAR_LABEL[_ai_wear]}**"
+                if _ai_note:
+                    _msg += f" — {_ai_note}"
+                _msg += " (verifiser selv)"
+                st.caption(_msg)
+            else:
+                st.caption("Hvor slitt er settet — fra som-ny til akseptabel")
+            _wear_keys = list(WEAR_LABEL.keys())
+            try:
+                wear_level = st.segmented_control(
+                    label="Slitasjegrad",
+                    options=_wear_keys,
+                    format_func=lambda x: WEAR_LABEL[x],
+                    selection_mode="single",
+                    default=st.session_state.get("reg_wear_level"),
+                    key="reg_wear_pick",
+                    label_visibility="collapsed",
+                )
+            except Exception:
+                _wcols = st.columns(len(_wear_keys))
+                for _wc, _wk in zip(_wcols, _wear_keys):
+                    _is_w = st.session_state.get("reg_wear_level") == _wk
+                    with _wc:
+                        if st.button(WEAR_LABEL[_wk],
+                                     use_container_width=True,
+                                     type="primary" if _is_w else "secondary",
+                                     key=f"wear_btn_{_wk}"):
+                            st.session_state["reg_wear_level"] = _wk
+                            st.rerun()
+                wear_level = st.session_state.get("reg_wear_level")
+            else:
+                st.session_state["reg_wear_level"] = wear_level
+        else:
+            # Sealed → wear_level is not meaningful; clear any stale value
+            st.session_state["reg_wear_level"] = None
         notes       = st.text_area("Notater", placeholder="Fri tekst ...")
 
         col_back, col_next = st.columns(2)
@@ -1918,6 +2023,7 @@ with tab_register:
                         "subtheme":    subtheme.strip() or None,
                         "year":        int(year),
                         "condition":   condition,
+                        "wear_level":  st.session_state.get("reg_wear_level"),
                         "notes":       notes.strip() or None,
                         "num_parts":   st.session_state.get("rb_parts"),
                         "num_minifigs": st.session_state.get("rb_minifigs"),
