@@ -612,9 +612,21 @@ def rb_resolve_themes(data: dict) -> dict:
             if nm:
                 chain.append(nm)
             cur_id = td.get("parent_id")
+        # Strip RB meta-roots that aren't real themes ("LEGO" sits above
+        # all sets as a branding label and shouldn't be the theme).
+        _RB_META_ROOTS = {"LEGO", "Lego"}
+        while chain and chain[-1] in _RB_META_ROOTS:
+            chain.pop()
         if chain:
             theme_name    = chain[-1]
             subtheme_name = chain[0] if len(chain) > 1 and chain[0] != chain[-1] else ""
+            # Special case: if the chain collapsed to a single element and
+            # that element is itself a known sub-category (e.g. "Promotional"),
+            # expose it as subtheme instead of theme so BL can supply the
+            # real parent theme on top.
+            if len(chain) == 1 and chain[0] in {"Promotional", "Promotional Sets"}:
+                theme_name    = ""
+                subtheme_name = chain[0]
     data["_theme_name"]    = theme_name
     data["_subtheme_name"] = subtheme_name
     return data
