@@ -174,6 +174,14 @@ def sb_patch(table, filters: dict, data: dict):
     )
     r.raise_for_status()
 
+def sb_delete(table, filters: dict):
+    r = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers={**SB_HEADERS, "Prefer": "return=minimal"},
+        params=filters,
+    )
+    r.raise_for_status()
+
 def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
     """Fetch the official BrickLink catalog name for an item."""
     try:
@@ -783,8 +791,6 @@ def display_name(obj: dict) -> str:
 
 def init_state():
     defaults = {
-        "sort_by":          "ID",
-        "sort_asc":         True,
         "rb_name":          "",
         "rb_theme":         "",
         "rb_subtheme":      "",
@@ -1008,6 +1014,10 @@ def edit_dialog(obj: dict, loc_list: list):
 
     st.divider()
     col_del, col_save = st.columns([1, 2])
+    with col_del:
+        if st.button("🗑️ Slett", use_container_width=True, key=f"del_btn_{oid}"):
+            st.session_state[f"confirm_del_{oid}"] = True
+            st.rerun()
     with col_save:
         if st.button("💾 Lagre endringer", type="primary", use_container_width=True):
             if not name.strip():
@@ -1052,10 +1062,28 @@ def edit_dialog(obj: dict, loc_list: list):
             }
             sb_patch("objects", {"ownership_id": f"eq.{oid}"}, updates)
 
-            # If set_number or bl_item_no changed, clear stale BL data so it gets re-fetched
+            # If set_number or bl_item_no changed, immediately refetch BL name and price
             if sn_changed or bl_changed:
-                sb_patch("objects", {"ownership_id": f"eq.{oid}"},
-                         {"name_bl": None, "estimated_value_bl": None})
+                with st.spinner("Henter oppdatert BL-navn og pris ..."):
+                    try:
+                        new_price, new_bl_name = bl_get_price(
+                            set_number=new_sn or obj.get("set_number") or "",
+                            condition=condition,
+                            object_type=object_type,
+                            name=name or obj.get("name") or "",
+                            bl_item_no=new_bl or "",
+                        )
+                    except Exception as _e:
+                        new_price, new_bl_name = None, None
+                        st.warning(f"BL-oppslag feilet: {_e}")
+                sb_patch("objects", {"ownership_id": f"eq.{oid}"}, {
+                    "name_bl": new_bl_name,
+                    "estimated_value_bl": new_price,
+                })
+                if new_bl_name or new_price:
+                    st.toast(f"BL oppdatert: {new_bl_name or '–'} · {fmt_nok(new_price) if new_price else '–'}", icon="✅")
+                else:
+                    st.toast("Fant ikke BL-treff for nytt settnummer/BL-ID", icon="⚠️")
 
             # Upload new instruction file if provided
             if new_instr_file:
@@ -1066,6 +1094,45 @@ def edit_dialog(obj: dict, loc_list: list):
 
             st.cache_data.clear()
             st.rerun()
+
+    # ── Delete confirmation panel ─────────────────────────────────────────────
+    if st.session_state.get(f"confirm_del_{oid}"):
+        st.divider()
+        st.error(
+            "⚠️ **Du er i ferd med å slette dette objektet permanent.**\n\n"
+            "Sletting kan IKKE angres. All historikk forsvinner — inkludert status "
+            "som SOLGT, UTLÅNT, notater, kjøpshistorikk og dokumentasjonsbilde. "
+            "Hvis objektet er solgt og du ønsker å bevare historikken, sett Status "
+            "til *Solgt* i stedet for å slette.\n\n"
+            f"For å bekrefte, skriv inn objektets ID **{oid}** nedenfor:"
+        )
+        confirm_txt = st.text_input(
+            "Bekreftelses-ID",
+            key=f"confirm_txt_{oid}",
+            placeholder=oid,
+            label_visibility="collapsed",
+        )
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            if st.button("← Avbryt", use_container_width=True, key=f"cancel_del_{oid}"):
+                st.session_state[f"confirm_del_{oid}"] = False
+                st.session_state.pop(f"confirm_txt_{oid}", None)
+                st.rerun()
+        with cc2:
+            can_delete = confirm_txt.strip() == oid
+            if st.button("🗑️ Slett permanent", type="primary",
+                         disabled=not can_delete,
+                         use_container_width=True,
+                         key=f"do_del_{oid}"):
+                try:
+                    sb_delete("objects", {"ownership_id": f"eq.{oid}"})
+                    st.session_state[f"confirm_del_{oid}"] = False
+                    st.session_state.pop(f"confirm_txt_{oid}", None)
+                    st.cache_data.clear()
+                    st.toast(f"Slettet {oid}", icon="🗑️")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Sletting feilet: {_e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1111,12 +1178,6 @@ with tab_collection:
         all_locs = sorted({o["location_name"] for o in objects if o.get("location_name") != "–"})
         sel_locs = st.multiselect("Lokasjon", all_locs, key="filter_locs")
 
-        st.divider()
-        group_options = {"Ingen": None, "Tema": "theme", "Type": "object_type",
-                         "Lokasjon": "location_name", "År": "year"}
-        group_by = st.selectbox("Grupper etter", list(group_options.keys()),
-                                 index=0, key="group_by_select")
-
         has_filter = bool(search or sel_themes or sel_types or sel_conds or sel_locs)
         if has_filter:
             if st.button("✕ Nullstill filter", use_container_width=True):
@@ -1156,29 +1217,17 @@ with tab_collection:
     if not filtered:
         st.info("Ingen objekter matcher filteret.")
     else:
-        # Persistent sort controls — this is the only sort mechanism (dataframe column
-        # sorting resets on every rerun, so we disable it by not relying on it).
-        sort_cols = {
-            "Status": "_status", "Settnr.": "set_number", "Navn": "_display_name",
-            "Tema": "theme", "År": "year", "Type": "object_type",
-            "Tilstand": "condition", "Verdi": "estimated_value_bl",
-            "Lokasjon": "location_name", "ID": "ownership_id",
-        }
-        scol1, scol2, scol3 = st.columns([3, 1, 1])
-        with scol1:
-            sort_by = st.selectbox("Sorter etter", list(sort_cols.keys()),
-                                   index=list(sort_cols.keys()).index(
-                                       st.session_state.get("sort_by", "Settnr.")),
-                                   key="sort_by_select", label_visibility="collapsed")
-        with scol2:
-            sort_dir = st.selectbox("Retning", ["↑ Stigende", "↓ Synkende"],
-                                    index=0 if st.session_state.get("sort_asc", True) else 1,
-                                    key="sort_dir_select", label_visibility="collapsed")
-        sort_asc = sort_dir.startswith("↑")
-        st.session_state["sort_by"] = sort_by
-        st.session_state["sort_asc"] = sort_asc
+        # Group selector lives above the table (sidebar is hidden by default on mobile)
+        group_options = {"Ingen": None, "Tema": "theme", "Type": "object_type",
+                         "Lokasjon": "location_name", "År": "year"}
+        gcol1, gcol2 = st.columns([1, 3])
+        with gcol1:
+            group_by = st.selectbox("Grupper etter", list(group_options.keys()),
+                                    index=list(group_options.keys()).index(
+                                        st.session_state.get("group_by_select", "Ingen")),
+                                    key="group_by_select")
 
-        # Pre-compute status for sorting
+        # Pre-compute status for display (and unused sort fallback)
         def _row_status(o):
             issues = []
             if not o.get("estimated_value_bl"):
@@ -1192,20 +1241,29 @@ with tab_collection:
                 return "✅"
             return "⚠️ " + ", ".join(issues)
 
-        # Sort filtered list
-        _sk = sort_cols[sort_by]
-        def _sort_key(o):
-            if _sk == "_display_name":
-                return display_name(o).lower()
-            if _sk == "_status":
-                return _row_status(o)
-            v = o.get(_sk)
-            if v is None:
-                return "" if _sk not in ("year", "estimated_value_bl") else 0
-            return v if not isinstance(v, str) else v.lower()
-        filtered.sort(key=_sort_key, reverse=not sort_asc)
+        # ── Natural sort on set_number ──────────────────────────────────────
+        # Split "71011-16" into (71011, 16) so that 8683-2 < 8683-10 < 8684-0
+        # and e.g. 8684-0 always follows the full 8683-X block. Plain lex sort
+        # gave weird interleaving; numeric-aware sort is stable and predictable.
+        def _natural_set_key(o):
+            sn = (o.get("set_number") or "").strip()
+            if not sn:
+                return (10**9, 10**9)
+            base, _, suf = sn.partition("-")
+            try:
+                b = int(base)
+            except ValueError:
+                # Non-numeric base (e.g. "col15-16" or MOC) — push to the end
+                # but keep internal ordering stable
+                return (10**9, sn)
+            try:
+                s = int(suf) if suf else 0
+            except ValueError:
+                s = 0
+            return (b, s)
+        filtered.sort(key=_natural_set_key)
 
-        st.caption("Klikk en rad for å se detaljer og redigere.")
+        st.caption("Klikk en kolonne for å sortere, eller en rad for å redigere.")
 
         def _make_rows(objs):
             return [{
