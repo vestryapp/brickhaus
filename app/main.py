@@ -665,6 +665,16 @@ def fetch_objects():
             params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,wear_level,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,num_minifigs,is_built,has_instructions,has_original_box,completeness_level,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
         )
         chunk = r.json()
+        # Defensive: PostgREST returns a dict with {code, message, details, hint}
+        # on error (e.g. missing column after an un-migrated schema change).
+        # Iterating a dict would silently yield its keys as strings and
+        # corrupt `objects`, so raise with a useful message instead.
+        if isinstance(chunk, dict):
+            raise RuntimeError(
+                f"Supabase returned an error from /objects: "
+                f"{chunk.get('message') or chunk}. "
+                f"Har du kjørt alle migrasjoner i brickhaus/db/?"
+            )
         if not chunk:
             break
         rows.extend(chunk)
