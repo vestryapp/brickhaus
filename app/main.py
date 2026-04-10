@@ -624,6 +624,34 @@ def rb_search_variants(base_num: str) -> list:
     except Exception:
         return []
 
+def rb_name_search(query: str, limit: int = 20) -> list:
+    """Free-text name search against Rebrickable. Returns raw results
+    without any base-number filtering, so callers can offer the user a
+    pick-from-list experience when they typed a name instead of a number."""
+    try:
+        r = requests.get(
+            "https://rebrickable.com/api/v3/lego/sets/",
+            headers=RB_HEADERS,
+            params={"search": query, "page_size": limit, "ordering": "-year"},
+            timeout=10,
+        )
+        if not r.ok:
+            return []
+        return r.json().get("results", []) or []
+    except Exception:
+        return []
+
+
+def _looks_like_set_number(q: str) -> bool:
+    """Heuristic: '75192', '71011-8', '40370-1' → True; 'Millennium Falcon' → False."""
+    q = q.strip()
+    if not q:
+        return False
+    # Strict: digits, optionally followed by -digits (no spaces, no letters)
+    import re
+    return bool(re.fullmatch(r"\d+(?:-\d+)?", q))
+
+
 def rb_lookup(set_number: str) -> dict | None:
     """Fetch a single known set variant (set_number must include '-X' suffix)."""
     try:
@@ -1586,8 +1614,17 @@ with tab_register:
             st.session_state["reg_step"]    = 2
 
         def _do_rb_fetch(raw: str):
-            base = raw.strip().split("-")[0]
-            variants = rb_search_variants(base)
+            q = raw.strip()
+            if _looks_like_set_number(q):
+                # Traditional set-number flow: find all variants sharing
+                # the base number and let the user pick if there are several.
+                base = q.split("-")[0]
+                variants = rb_search_variants(base)
+            else:
+                # Name search: hit the database with free text and
+                # present any matches back as a pick-from-list.
+                variants = rb_name_search(q)
+
             if not variants:
                 st.session_state["rb_status"]   = "not_found"
                 st.session_state["rb_variants"] = None
@@ -1681,9 +1718,9 @@ with tab_register:
                 rb_name = ai_result.get("_rb_name")
 
                 if sett:
-                    # Show user's uploaded photo next to Rebrickable reference
+                    # Show user's uploaded photo next to the catalog reference
                     # so they can verify the match visually — no fake confidence label.
-                    st.caption("**AI-forslag:** sammenlign ditt bilde (venstre) med Rebrickable-referansen (høyre)")
+                    st.caption("**AI-forslag:** sammenlign ditt bilde (venstre) med referansebildet (høyre)")
                     col_user, col_ref = st.columns(2)
                     with col_user:
                         user_bytes = st.session_state.get("reg_uploaded_img_bytes")
@@ -1694,7 +1731,7 @@ with tab_register:
                             st.image(rb_img, caption=f"{rb_name or name} ({sett})",
                                      use_container_width=True)
                         else:
-                            st.info(f"Fant ingen Rebrickable-forhåndsvisning for {sett}.")
+                            st.info(f"Fant ingen forhåndsvisning for {sett}.")
 
                     st.markdown(f"**Forslag:** {rb_name or name} — `{sett}`")
                     col_yes, col_no = st.columns(2)
@@ -1702,7 +1739,7 @@ with tab_register:
                         if st.button("✅ Stemmer — fortsett", type="primary",
                                      use_container_width=True):
                             st.session_state["reg_set_number"] = sett
-                            with st.spinner("Henter fra Rebrickable ..."):
+                            with st.spinner("Henter settinfo ..."):
                                 _do_rb_fetch(sett)
                             st.rerun()
                     with col_no:
@@ -1733,33 +1770,40 @@ with tab_register:
 
         # ── Number path ───────────────────────────────────────────────────────
         elif input_mode == "number":
-            st.subheader("🔢 Settnummer")
+            st.subheader("🔍 Settnummer eller navn")
+            st.caption("Skriv inn et settnummer (f.eks. 75192) eller et settnavn (f.eks. 'Millennium Falcon')")
 
             def _on_set_num_change():
                 st.session_state["rb_fetch_trigger"] = True
 
             set_num = st.text_input(
-                "Settnummer",
+                "Settnummer eller navn",
                 value=st.session_state["reg_set_number"] or "",
-                placeholder="f.eks. 75192",
+                placeholder="75192  —  eller  —  Millennium Falcon",
                 key="_set_num_input",
                 on_change=_on_set_num_change,
+                label_visibility="collapsed",
             )
 
             if st.session_state.get("rb_fetch_trigger") and set_num.strip():
                 st.session_state["rb_fetch_trigger"] = False
-                st.session_state["reg_set_number"] = set_num.strip()
-                with st.spinner("Henter ..."):
+                # Only persist as set_number if it actually looks like one.
+                # Name queries go through lookup but shouldn't overwrite the
+                # real set_number field until the user picks a match.
+                if _looks_like_set_number(set_num):
+                    st.session_state["reg_set_number"] = set_num.strip()
+                with st.spinner("Søker ..."):
                     _do_rb_fetch(set_num.strip())
                 st.rerun()
 
             col_a, col_b = st.columns([3, 1])
             with col_a:
-                if st.button("🔍 Hent info fra Rebrickable", use_container_width=True,
+                if st.button("🔍 Søk", use_container_width=True,
                              type="primary", disabled=not set_num.strip()):
                     st.session_state["rb_fetch_trigger"] = False
-                    st.session_state["reg_set_number"] = set_num.strip()
-                    with st.spinner("Henter ..."):
+                    if _looks_like_set_number(set_num):
+                        st.session_state["reg_set_number"] = set_num.strip()
+                    with st.spinner("Søker ..."):
                         _do_rb_fetch(set_num.strip())
                     st.rerun()
             with col_b:
@@ -1770,7 +1814,7 @@ with tab_register:
             # ── Variant gallery ───────────────────────────────────────────────
             if st.session_state["rb_status"] == "multiple":
                 variants = st.session_state["rb_variants"] or []
-                st.info(f"Fant {len(variants)} varianter — velg riktig:")
+                st.info(f"Fant {len(variants)} treff — velg riktig:")
                 cols_per_row = 4
                 for row_start in range(0, len(variants), cols_per_row):
                     row_variants = variants[row_start:row_start + cols_per_row]
@@ -1791,7 +1835,7 @@ with tab_register:
                                     st.rerun()
 
             elif st.session_state["rb_status"] == "not_found":
-                st.warning("Ikke funnet i Rebrickable — gå videre og fyll inn manuelt.")
+                st.warning("Ikke funnet — gå videre og fyll inn manuelt.")
                 if st.button("Gå videre →", type="primary"):
                     st.session_state["reg_step"] = 2
                     st.rerun()
