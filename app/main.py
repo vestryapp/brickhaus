@@ -274,6 +274,12 @@ def bl_fetch_set_metadata(set_number: str) -> dict | None:
                 chain.append(cat_name)
             cur_id = parent_id if parent_id and parent_id != cur_id else None
 
+        # Strip BL meta-roots that aren't real themes — "Sets" sits above
+        # all set categories as a catalog marker, not a theme.
+        _BL_META_ROOTS = {"Sets", "Catalog", "Set"}
+        while chain and chain[-1] in _BL_META_ROOTS:
+            chain.pop()
+
         # chain = [leaf, ..., root]; theme = root, subtheme = leaf (if != root)
         theme    = chain[-1] if chain else None
         subtheme = chain[0] if len(chain) > 1 and chain[0] != chain[-1] else None
@@ -577,27 +583,38 @@ def bl_get_price(set_number: str, condition: str, object_type: str = "SET",
     return None, None
 
 def rb_resolve_themes(data: dict) -> dict:
-    """Resolve theme/subtheme hierarchy and add _theme_name/_subtheme_name."""
+    """Resolve theme/subtheme hierarchy and add _theme_name/_subtheme_name.
+
+    Walks the FULL Rebrickable theme ancestry (not just one parent), so
+    nested themes like Train > Promotional give both a theme and subtheme.
+    chain is [leaf, parent, grandparent, ..., root]. We pick theme=root
+    and subtheme=leaf when they differ.
+    """
     theme_name, subtheme_name = "", ""
     theme_id = data.get("theme_id")
     if theme_id:
-        tr = requests.get(
-            f"https://rebrickable.com/api/v3/lego/themes/{theme_id}/",
-            headers=RB_HEADERS, timeout=5,
-        )
-        if tr.ok:
-            theme_data = tr.json()
-            parent_id = theme_data.get("parent_id")
-            if parent_id:
-                subtheme_name = theme_data.get("name", "")
-                pr = requests.get(
-                    f"https://rebrickable.com/api/v3/lego/themes/{parent_id}/",
+        chain: list[str] = []
+        cur_id = theme_id
+        seen: set[int] = set()
+        while cur_id and cur_id not in seen and len(chain) < 6:
+            seen.add(cur_id)
+            try:
+                tr = requests.get(
+                    f"https://rebrickable.com/api/v3/lego/themes/{cur_id}/",
                     headers=RB_HEADERS, timeout=5,
                 )
-                if pr.ok:
-                    theme_name = pr.json().get("name", "")
-            else:
-                theme_name = theme_data.get("name", "")
+                if not tr.ok:
+                    break
+                td = tr.json()
+            except Exception:
+                break
+            nm = (td.get("name") or "").strip()
+            if nm:
+                chain.append(nm)
+            cur_id = td.get("parent_id")
+        if chain:
+            theme_name    = chain[-1]
+            subtheme_name = chain[0] if len(chain) > 1 and chain[0] != chain[-1] else ""
     data["_theme_name"]    = theme_name
     data["_subtheme_name"] = subtheme_name
     return data
@@ -2228,7 +2245,7 @@ with tab_register:
         cached_type  = st.session_state.get("reg_uploaded_img_type")
         if (cached_bytes and obj_uuid
                 and not st.session_state.get("reg_doc_img_saved")):
-            with st.spinner("Lagrer bildet ditt som dokumentasjon ..."):
+            with st.spinner("Lagrer bildet ..."):
                 try:
                     ok = save_documentation_image(obj_uuid, ownership_id,
                                                   cached_bytes, cached_type)
@@ -2239,17 +2256,16 @@ with tab_register:
                 st.session_state["reg_doc_img_saved"] = True
 
         if st.session_state.get("reg_doc_img_saved"):
-            st.success("📷 Bildet ditt fra AI-flyten er lagret som dokumentasjon — "
-                       "kvalitetsnivået er satt til 🔵 Documented.")
+            st.success("📷 Bildet ditt er lagret sammen med oppføringen.")
             if cached_bytes:
-                st.image(cached_bytes, width=200, caption="Lagret dokumentasjonsbilde")
+                st.image(cached_bytes, width=200, caption="Lagret bilde")
 
         # ── Manual upload (if no cached image, or user wants to replace) ────
-        st.subheader("📷 Legg til / bytt dokumentasjonsbilde (valgfri)")
+        st.subheader("📷 Legg til eller bytt bilde (valgfri)")
         if st.session_state.get("reg_doc_img_saved"):
-            st.caption("Du har allerede et dokumentasjonsbilde. Last opp et nytt for å erstatte det.")
+            st.caption("Bilde er allerede lagret. Last opp et nytt for å erstatte det.")
         else:
-            st.caption("Laster du opp et bilde, oppgraderes kvalitetsnivået til 🔵 Documented automatisk.")
+            st.caption("Et bilde gjør det lettere å kjenne igjen settet senere.")
 
         img_file = st.file_uploader(
             "Velg bilde",
@@ -2268,7 +2284,7 @@ with tab_register:
                         st.error(f"Opplasting feilet: {e}")
                 if ok:
                     st.session_state["reg_doc_img_saved"] = True
-                    st.success("📷 Bilde lagret — kvalitetsnivået er satt til 🔵 Documented!")
+                    st.success("📷 Bilde lagret!")
                     st.rerun()
                 elif ok is False and not img_file:
                     st.error("Opplasting feilet. Sjekk at storage-bucket er opprettet i Supabase.")
