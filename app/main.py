@@ -813,6 +813,9 @@ def init_state():
         "moc_prefill":       None,
         "moc_rb_results":    None,
         "last_shown_oid":    None,
+        "reg_uploaded_img_bytes": None,  # cached bytes from AI flow, reused as documentation
+        "reg_uploaded_img_type":  None,
+        "reg_doc_img_saved":  False,     # tracks whether documentation image was saved in step 5
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -824,12 +827,14 @@ def reset_registration():
     keys = ["rb_name","rb_theme","rb_subtheme","rb_img","rb_parts","rb_minifigs","rb_status",
             "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants",
             "reg_saved","reg_ownership_id","reg_obj_uuid",
-            "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results"]
+            "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results",
+            "reg_uploaded_img_bytes","reg_uploaded_img_type"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
     st.session_state["rb_status"] = None
     st.session_state["reg_step"] = 1
+    st.session_state["reg_doc_img_saved"] = False
 
 
 # ── Edit dialog ───────────────────────────────────────────────────────────────
@@ -1462,19 +1467,52 @@ with tab_register:
                 if img_file:
                     if st.button("🔍 Identifiser sett", type="primary",
                                  use_container_width=True):
+                        # Cache the uploaded bytes so we can reuse them later
+                        # as the documentation image (avoids a second upload).
+                        img_bytes = img_file.read()
+                        st.session_state["reg_uploaded_img_bytes"] = img_bytes
+                        st.session_state["reg_uploaded_img_type"]  = img_file.type
                         with st.spinner("Analyserer bilde ..."):
-                            result = identify_lego_from_image(
-                                img_file.read(), img_file.type)
+                            result = identify_lego_from_image(img_bytes, img_file.type)
                         st.session_state["reg_ai_result"] = result
+                        # Pre-fetch Rebrickable reference image so user can verify
+                        # visually on the next render (cached on ai_result).
+                        sett = result.get("set_number")
+                        if sett:
+                            try:
+                                variants = rb_search_variants(sett.split("-")[0])
+                                if variants:
+                                    match = next((v for v in variants
+                                                  if v.get("set_num") == sett), variants[0])
+                                    result["_rb_img"]  = match.get("set_img_url")
+                                    result["_rb_name"] = match.get("name")
+                                    result["_rb_set_num"] = match.get("set_num")
+                            except Exception:
+                                pass
                         st.rerun()
             else:
-                conf = ai_result.get("confidence", "low")
                 sett = ai_result.get("set_number")
                 name = ai_result.get("name")
+                rb_img = ai_result.get("_rb_img")
+                rb_name = ai_result.get("_rb_name")
 
-                if sett and conf in ("high", "medium"):
-                    conf_label = "🟢 Høy sikkerhet" if conf == "high" else "🟡 Middels sikkerhet"
-                    st.success(f"**Gjenkjent:** {name} ({sett}) — {conf_label}")
+                if sett:
+                    # Show user's uploaded photo next to Rebrickable reference
+                    # so they can verify the match visually — no fake confidence label.
+                    st.caption("**AI-forslag:** sammenlign ditt bilde (venstre) med Rebrickable-referansen (høyre)")
+                    col_user, col_ref = st.columns(2)
+                    with col_user:
+                        user_bytes = st.session_state.get("reg_uploaded_img_bytes")
+                        if user_bytes:
+                            st.image(user_bytes, caption="Ditt bilde", use_container_width=True)
+                    with col_ref:
+                        if rb_img:
+                            st.image(rb_img, caption=f"{rb_name or name} ({sett})",
+                                     use_container_width=True)
+                        else:
+                            st.info(f"Fant ingen Rebrickable-forhåndsvisning for {sett}.")
+
+                    st.markdown(f"**Forslag:** {rb_name or name} — `{sett}`")
                     col_yes, col_no = st.columns(2)
                     with col_yes:
                         if st.button("✅ Stemmer — fortsett", type="primary",
@@ -1489,15 +1527,11 @@ with tab_register:
                             st.session_state["reg_input_mode"] = "number"
                             st.rerun()
                 else:
-                    st.warning("Kunne ikke identifisere settet med tilstrekkelig sikkerhet.")
+                    st.warning("Kunne ikke identifisere settet fra bildet.")
                     if ai_result.get("note"):
                         st.caption(ai_result["note"])
-                    elif sett:
-                        st.caption(f"Beste gjett: {name} ({sett}) — for usikkert til å fortsette automatisk.")
                     if st.button("🔢 Gå til manuelt settnummer", type="primary",
                                  use_container_width=True):
-                        if sett:
-                            st.session_state["reg_set_number"] = sett
                         st.session_state["reg_ai_result"]  = None
                         st.session_state["reg_input_mode"] = "number"
                         st.rerun()
@@ -1505,6 +1539,8 @@ with tab_register:
             if st.button("← Tilbake", use_container_width=True):
                 st.session_state["reg_ai_result"]  = None
                 st.session_state["reg_input_mode"] = None
+                # Keep cached bytes — user may still want them as documentation
+                # if they proceed via number path instead.
                 st.rerun()
             st.divider()
             _progress_indicator(step)
@@ -1723,6 +1759,8 @@ with tab_register:
             list(CONDITION_LABEL.keys()),
             format_func=lambda x: CONDITION_LABEL[x],
             help="'Brukt' = bygget og lekt med, synlig slitasje",
+            index=None,
+            placeholder="— Velg tilstand —",
         )
         notes       = st.text_area("Notater", placeholder="Fri tekst ...")
 
@@ -1735,6 +1773,8 @@ with tab_register:
             if st.button("Neste →", use_container_width=True, type="primary"):
                 if not name.strip():
                     st.error("Navn er påkrevd.")
+                elif condition is None:
+                    st.error("Tilstand er påkrevd — velg en verdi i nedtrekksmenyen.")
                 else:
                     st.session_state["pending_record"] = {
                         "object_type": object_type,
@@ -1876,9 +1916,34 @@ with tab_register:
 
         st.success(f"✅ **{saved_name}** lagret som **{ownership_id}**")
 
-        # Optional documentation image
-        st.subheader("📷 Legg til bilde (valgfri)")
-        st.caption("Laster du opp et bilde, oppgraderes kvalitetsnivået til 🔵 Documented automatisk.")
+        # ── Auto-save cached image from AI flow as documentation ────────────
+        cached_bytes = st.session_state.get("reg_uploaded_img_bytes")
+        cached_type  = st.session_state.get("reg_uploaded_img_type")
+        if (cached_bytes and obj_uuid
+                and not st.session_state.get("reg_doc_img_saved")):
+            with st.spinner("Lagrer bildet ditt som dokumentasjon ..."):
+                try:
+                    ok = save_documentation_image(obj_uuid, ownership_id,
+                                                  cached_bytes, cached_type)
+                except Exception as e:
+                    ok = False
+                    st.error(f"Kunne ikke lagre bilde automatisk: {e}")
+            if ok:
+                st.session_state["reg_doc_img_saved"] = True
+
+        if st.session_state.get("reg_doc_img_saved"):
+            st.success("📷 Bildet ditt fra AI-flyten er lagret som dokumentasjon — "
+                       "kvalitetsnivået er satt til 🔵 Documented.")
+            if cached_bytes:
+                st.image(cached_bytes, width=200, caption="Lagret dokumentasjonsbilde")
+
+        # ── Manual upload (if no cached image, or user wants to replace) ────
+        st.subheader("📷 Legg til / bytt dokumentasjonsbilde (valgfri)")
+        if st.session_state.get("reg_doc_img_saved"):
+            st.caption("Du har allerede et dokumentasjonsbilde. Last opp et nytt for å erstatte det.")
+        else:
+            st.caption("Laster du opp et bilde, oppgraderes kvalitetsnivået til 🔵 Documented automatisk.")
+
         img_file = st.file_uploader(
             "Velg bilde",
             type=["jpg", "jpeg", "png", "webp"],
@@ -1888,11 +1953,17 @@ with tab_register:
         if img_file and obj_uuid:
             if st.button("⬆️ Last opp bilde", use_container_width=True):
                 with st.spinner("Laster opp ..."):
-                    ok = save_documentation_image(obj_uuid, ownership_id,
-                                                  img_file.read(), img_file.type)
+                    try:
+                        ok = save_documentation_image(obj_uuid, ownership_id,
+                                                      img_file.read(), img_file.type)
+                    except Exception as e:
+                        ok = False
+                        st.error(f"Opplasting feilet: {e}")
                 if ok:
-                    st.success("📷 Bilde lagret — 🔵 Documented!")
-                else:
+                    st.session_state["reg_doc_img_saved"] = True
+                    st.success("📷 Bilde lagret — kvalitetsnivået er satt til 🔵 Documented!")
+                    st.rerun()
+                elif ok is False and not img_file:
                     st.error("Opplasting feilet. Sjekk at storage-bucket er opprettet i Supabase.")
 
         if st.button("➕ Registrer et til", type="primary", use_container_width=True):

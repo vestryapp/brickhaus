@@ -24,8 +24,10 @@ create type quality_level as enum (
 );
 
 create type image_type as enum (
-  'reference', 'documentation'
+  'reference', 'documentation', 'REFERENCE', 'DOCUMENTATION'
 );
+-- NOTE: App code uses uppercase. Lowercase kept for backwards-compat only.
+-- See db/migration_image_type_uppercase.sql.
 
 create type status_type as enum (
   'OWNED', 'SOLD', 'LOANED', 'WANTED'
