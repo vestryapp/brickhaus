@@ -197,6 +197,74 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _bl_category_name(cat_id: int) -> tuple[str | None, int | None]:
+    """Return (category_name, parent_id) for a BrickLink category, cached."""
+    if not cat_id:
+        return None, None
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/categories/{cat_id}",
+            auth=_bl_auth(), timeout=8,
+        )
+        if not r.ok:
+            return None, None
+        data = r.json().get("data") or {}
+        return data.get("category_name"), data.get("parent_id")
+    except Exception:
+        return None, None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def bl_fetch_set_metadata(set_number: str) -> dict | None:
+    """
+    Fetch BrickLink catalog metadata for a set — BL is authoritative
+    (owned by LEGO). Returns dict with name, theme, subtheme, year.
+
+    Category walk: BL stores sets in a single category_id, which may have
+    a parent. We use the top-most ancestor as `theme` and the leaf (the
+    set's direct category) as `subtheme` when different.
+    """
+    if not BL_CONSUMER_KEY or not set_number:
+        return None
+    bl_id = set_number if "-" in set_number else f"{set_number}-1"
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/items/SET/{bl_id}",
+            auth=_bl_auth(), timeout=8,
+        )
+        if not r.ok:
+            return None
+        data = r.json().get("data") or {}
+        name = html.unescape(data.get("name") or "") or None
+        year = data.get("year_released")
+        cat_id = data.get("category_id")
+
+        # Walk category tree up to root
+        chain: list[str] = []
+        cur_id = cat_id
+        seen = set()
+        while cur_id and cur_id not in seen and len(chain) < 6:
+            seen.add(cur_id)
+            cat_name, parent_id = _bl_category_name(cur_id)
+            if cat_name:
+                chain.append(cat_name)
+            cur_id = parent_id if parent_id and parent_id != cur_id else None
+
+        # chain = [leaf, ..., root]; theme = root, subtheme = leaf (if != root)
+        theme    = chain[-1] if chain else None
+        subtheme = chain[0] if len(chain) > 1 and chain[0] != chain[-1] else None
+
+        return {
+            "name":     name,
+            "theme":    theme,
+            "subtheme": subtheme,
+            "year":     year,
+        }
+    except Exception:
+        return None
+
+
 _USD_TO_NOK = 10.5  # approximate fallback rate, updated periodically
 
 def _bl_fetch_one(item_type: str, item_id: str,
@@ -602,10 +670,18 @@ def fetch_locations():
     return r.json()
 
 def next_ownership_id():
+    # Filter only BH-* IDs. Mixed LG-* (Excel import) and BH-* (new) rows
+    # would otherwise collide: lexicographic desc picks LG-xxx (L > B),
+    # producing BH-{LG_num+1} every time → 409 on the unique constraint.
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/objects",
         headers=SB_HEADERS,
-        params={"select": "ownership_id", "order": "ownership_id.desc", "limit": 1},
+        params={
+            "select":       "ownership_id",
+            "ownership_id": "like.BH-*",
+            "order":        "ownership_id.desc",
+            "limit":        1,
+        },
     )
     rows = r.json()
     if not rows:
@@ -816,6 +892,8 @@ def init_state():
         "reg_uploaded_img_bytes": None,  # cached bytes from AI flow, reused as documentation
         "reg_uploaded_img_type":  None,
         "reg_doc_img_saved":  False,     # tracks whether documentation image was saved in step 5
+        "reg_last_img_file_id":  None,    # prevents re-running identification on rerun
+        "reg_condition":        None,    # segmented control state for Tilstand
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -828,7 +906,8 @@ def reset_registration():
             "reg_set_number","pending_record","confirm_no_loc","rb_fetch_trigger","rb_variants",
             "reg_saved","reg_ownership_id","reg_obj_uuid",
             "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results",
-            "reg_uploaded_img_bytes","reg_uploaded_img_type"]
+            "reg_uploaded_img_bytes","reg_uploaded_img_type",
+            "reg_last_img_file_id","reg_condition"]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -1380,6 +1459,16 @@ with tab_register:
 
     step = st.session_state["reg_step"]
 
+    # Persistent context header — shows current set number and name
+    # throughout all registration steps once they are known.
+    _ctx_sn   = st.session_state.get("reg_set_number")
+    _ctx_name = st.session_state.get("rb_name")
+    if _ctx_sn:
+        _bits = [f"📦 **{_ctx_sn}**"]
+        if _ctx_name:
+            _bits.append(_ctx_name)
+        st.caption(" · ".join(_bits))
+
     def _progress_indicator(step):
         steps = ["Settnummer", "Detaljer", "Plassering", "Kjøp", "Lagre"]
         cols  = st.columns(len(steps))
@@ -1407,6 +1496,20 @@ with tab_register:
             st.session_state["rb_minifigs"] = rb_minifig_count(data.get("set_num", ""))
             st.session_state["rb_status"]   = "found"
             st.session_state["rb_variants"] = None
+
+            # Overlay BrickLink (authoritative — owned by LEGO) on top of
+            # Rebrickable. BL wins for name/theme/subtheme when available.
+            bl_meta = bl_fetch_set_metadata(data.get("set_num", ""))
+            if bl_meta:
+                if bl_meta.get("name"):
+                    st.session_state["rb_name"] = bl_meta["name"]
+                if bl_meta.get("theme"):
+                    st.session_state["rb_theme"] = bl_meta["theme"]
+                if bl_meta.get("subtheme"):
+                    st.session_state["rb_subtheme"] = bl_meta["subtheme"]
+                if bl_meta.get("year"):
+                    st.session_state["rb_year"] = bl_meta["year"]
+
             st.session_state["reg_step"]    = 2
 
         def _do_rb_fetch(raw: str):
@@ -1464,19 +1567,21 @@ with tab_register:
                     key="reg_id_img",
                     label_visibility="collapsed",
                 )
-                if img_file:
-                    if st.button("🔍 Identifiser sett", type="primary",
-                                 use_container_width=True):
-                        # Cache the uploaded bytes so we can reuse them later
-                        # as the documentation image (avoids a second upload).
+                # Auto-identify as soon as a new file is uploaded — skip the
+                # extra "Identifiser sett" click. Track file_id to avoid
+                # re-running identification on every Streamlit rerun.
+                if img_file is not None:
+                    file_id = getattr(img_file, "file_id", None) or img_file.name
+                    if st.session_state.get("reg_last_img_file_id") != file_id:
+                        st.session_state["reg_last_img_file_id"] = file_id
                         img_bytes = img_file.read()
                         st.session_state["reg_uploaded_img_bytes"] = img_bytes
                         st.session_state["reg_uploaded_img_type"]  = img_file.type
                         with st.spinner("Analyserer bilde ..."):
                             result = identify_lego_from_image(img_bytes, img_file.type)
                         st.session_state["reg_ai_result"] = result
-                        # Pre-fetch Rebrickable reference image so user can verify
-                        # visually on the next render (cached on ai_result).
+                        # Pre-fetch Rebrickable reference image for visual
+                        # side-by-side verification on next render.
                         sett = result.get("set_number")
                         if sett:
                             try:
@@ -1490,6 +1595,8 @@ with tab_register:
                             except Exception:
                                 pass
                         st.rerun()
+                    else:
+                        st.caption("⏳ Analyserer ...")
             else:
                 sett = ai_result.get("set_number")
                 name = ai_result.get("name")
@@ -1524,6 +1631,7 @@ with tab_register:
                     with col_no:
                         if st.button("❌ Stemmer ikke", use_container_width=True):
                             st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_last_img_file_id"] = None
                             st.session_state["reg_input_mode"] = "number"
                             st.rerun()
                 else:
@@ -1538,6 +1646,7 @@ with tab_register:
 
             if st.button("← Tilbake", use_container_width=True):
                 st.session_state["reg_ai_result"]  = None
+                st.session_state["reg_last_img_file_id"] = None
                 st.session_state["reg_input_mode"] = None
                 # Keep cached bytes — user may still want them as documentation
                 # if they proceed via number path instead.
@@ -1754,14 +1863,39 @@ with tab_register:
         subtheme    = st.text_input("Subtema", value=st.session_state["rb_subtheme"])
         year        = st.number_input("År", min_value=1949, max_value=2030,
                                       value=int(st.session_state["rb_year"]), step=1)
-        condition   = st.selectbox(
-            "Tilstand *",
-            list(CONDITION_LABEL.keys()),
-            format_func=lambda x: CONDITION_LABEL[x],
-            help="'Brukt' = bygget og lekt med, synlig slitasje",
-            index=None,
-            placeholder="— Velg tilstand —",
-        )
+        # Tilstand as a prominent segmented control — no default, required.
+        # Users must actively pick before saving, so a sealed box photo
+        # never auto-defaults to BUILT or vice versa.
+        st.markdown("**Tilstand \\***")
+        st.caption("'Brukt' = bygget og lekt med, synlig slitasje")
+        _cond_keys = list(CONDITION_LABEL.keys())
+        try:
+            condition = st.segmented_control(
+                label="Tilstand",
+                options=_cond_keys,
+                format_func=lambda x: CONDITION_LABEL[x],
+                selection_mode="single",
+                default=st.session_state.get("reg_condition"),
+                key="reg_condition_pick",
+                label_visibility="collapsed",
+            )
+        except Exception:
+            # Fallback for older Streamlit versions: use a row of st.buttons
+            _cond_cols = st.columns(len(_cond_keys))
+            for _c, _ck in zip(_cond_cols, _cond_keys):
+                _is_sel = st.session_state.get("reg_condition") == _ck
+                with _c:
+                    if st.button(CONDITION_LABEL[_ck],
+                                 use_container_width=True,
+                                 type="primary" if _is_sel else "secondary",
+                                 key=f"cond_btn_{_ck}"):
+                        st.session_state["reg_condition"] = _ck
+                        st.rerun()
+            condition = st.session_state.get("reg_condition")
+        else:
+            # segmented_control returns the selection directly;
+            # persist it so it survives reruns and can drive validation.
+            st.session_state["reg_condition"] = condition
         notes       = st.text_area("Notater", placeholder="Fri tekst ...")
 
         col_back, col_next = st.columns(2)
@@ -1773,8 +1907,8 @@ with tab_register:
             if st.button("Neste →", use_container_width=True, type="primary"):
                 if not name.strip():
                     st.error("Navn er påkrevd.")
-                elif condition is None:
-                    st.error("Tilstand er påkrevd — velg en verdi i nedtrekksmenyen.")
+                elif not condition:
+                    st.error("Tilstand er påkrevd — velg en verdi over.")
                 else:
                     st.session_state["pending_record"] = {
                         "object_type": object_type,
