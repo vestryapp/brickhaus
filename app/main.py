@@ -908,17 +908,20 @@ DOK_LABEL = {
 }
 
 STATUS_LABEL = {
-    "OWNED":  "Eid",
+    "OWNED":  "I samlingen",
     "SOLD":   "Solgt",
     "LOANED": "Utlånt",
     "WANTED": "Ønskeliste",
 }
 
+# "Mangler noe?" framing — flipped from the old clinical "Kompletthetsgrad"
+# so a non-technical user can answer a natural question instead of grading
+# a completeness level.
 COMPLETENESS_LABEL = {
     "COMPLETE":         "Komplett",
-    "NEARLY_COMPLETE":  "Nesten komplett",
-    "INCOMPLETE":       "Ufullstendig",
-    "UNKNOWN":          "Ukjent",
+    "NEARLY_COMPLETE":  "Noen få deler mangler",
+    "INCOMPLETE":       "Mye mangler",
+    "UNKNOWN":          "Vet ikke",
 }
 TYPE_LABEL = {
     "SET":            "Sett",
@@ -939,6 +942,26 @@ def fmt_nok(val):
     if val is None:
         return "–"
     return f"{int(val):,} kr".replace(",", "\u00a0")
+
+
+def fmt_bh_id(oid: str | None) -> tuple[str, str]:
+    """Return (compact, full) form of a BH-ID.
+
+    Compact: '#585' for readability, with a thin-space thousands separator
+    once the numeric part crosses 1 000 ('#1 234', '#12 345').
+    Full:    the canonical 'BH-0000585' form, preserved for delete guards
+             and copy-paste workflows.
+    """
+    if not oid:
+        return "–", "–"
+    if not oid.startswith("BH-"):
+        return oid, oid
+    try:
+        num = int(oid[3:])
+    except ValueError:
+        return oid, oid
+    compact = f"#{num:,}".replace(",", "\u00a0")
+    return compact, oid
 
 
 _CMF_BASES = {"8683","8684","8803","8804","8805","8827","8831","8833",
@@ -991,12 +1014,16 @@ def init_state():
         "moc_prefill":       None,
         "moc_rb_results":    None,
         "last_shown_oid":    None,
+        "pending_edit_oid":  None,
         "reg_uploaded_img_bytes": None,  # cached bytes from AI flow, reused as documentation
         "reg_uploaded_img_type":  None,
         "reg_doc_img_saved":  False,     # tracks whether documentation image was saved in step 5
         "reg_last_img_file_id":  None,    # prevents re-running identification on rerun
         "reg_condition":        None,    # segmented control state for Tilstand
         "reg_wear_level":       None,    # segmented control state for slitasje
+        "reg_has_instructions": False,
+        "reg_has_original_box": False,
+        "reg_completeness":     "UNKNOWN",
         "bl_name_secondary":    None,    # BL official name shown as caption when != name
     }
     for k, v in defaults.items():
@@ -1017,17 +1044,155 @@ def reset_registration():
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
     st.session_state["rb_status"] = None
+    st.session_state["reg_has_instructions"] = False
+    st.session_state["reg_has_original_box"] = False
+    st.session_state["reg_completeness"]     = "UNKNOWN"
     st.session_state["reg_step"] = 1
     st.session_state["reg_doc_img_saved"] = False
 
 
 # ── Edit dialog ───────────────────────────────────────────────────────────────
 
+@st.dialog("Objekt", width="large")
+def detail_dialog(obj: dict, loc_list: list):
+    """Read-only detail view of an object. Clicking Rediger flips the
+    session into edit mode — on the next rerun the collection view will
+    open edit_dialog for the same object.
+    """
+    oid = obj.get("ownership_id", "")
+    compact_id, full_id = fmt_bh_id(oid)
+
+    # Header: big compact ID, muted full BH-ID underneath for copy-paste/delete guard.
+    st.markdown(
+        f"### {compact_id}  "
+        f"<span style='color:#888;font-weight:normal;font-size:0.7em'>"
+        f"({full_id})</span>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Top: image + key facts ───────────────────────────────────────────────
+    col_img, col_info = st.columns([1, 2])
+    with col_img:
+        obj_uuid = obj.get("id")
+        img_shown = False
+        if obj_uuid:
+            try:
+                existing_img = fetch_object_image(obj_uuid)
+            except Exception:
+                existing_img = None
+            if existing_img:
+                st.image(image_public_url(existing_img["storage_path"]),
+                         use_container_width=True)
+                img_shown = True
+        if not img_shown:
+            st.caption("– Ingen bilde –")
+
+    with col_info:
+        disp_name = display_name(obj) or "–"
+        st.markdown(f"#### {html.escape(disp_name)}")
+        bl_full = obj.get("name_bl")
+        if bl_full:
+            st.caption(f"🏷️ BrickLink: {html.unescape(bl_full)}")
+        sn = obj.get("set_number") or "–"
+        bl_no = obj.get("bl_item_no") or ""
+        id_line = f"📦 Settnr: **{sn}**"
+        if bl_no and bl_no != sn:
+            id_line += f"  ·  BL Item: **{bl_no}**"
+        st.caption(id_line)
+
+        status_lbl = STATUS_LABEL.get(obj.get("status", "OWNED"), "–")
+        cond_lbl   = CONDITION_LABEL.get(obj.get("condition", ""), "–")
+        st.markdown(f"**Status:** {status_lbl} &nbsp;·&nbsp; **Tilstand:** {cond_lbl}",
+                    unsafe_allow_html=True)
+
+        val = obj.get("estimated_value_bl")
+        if val:
+            st.markdown(f"💰 **Verdi:** {fmt_nok(val)}")
+
+    st.divider()
+
+    # ── Facts list (two compact columns) ─────────────────────────────────────
+    def _kv(label: str, value):
+        if value in (None, "", "–"):
+            value = "–"
+        return (
+            f"<div style='display:flex;gap:10px;padding:3px 0'>"
+            f"<div style='width:140px;color:#666'>{label}</div>"
+            f"<div style='color:#111'>{html.escape(str(value))}</div></div>"
+        )
+
+    left_rows  = [
+        _kv("Type",          TYPE_LABEL.get(obj.get("object_type") or "", "–")),
+        _kv("Tema",          obj.get("theme") or "–"),
+        _kv("Subtema",       obj.get("subtheme") or "–"),
+        _kv("År",            obj.get("year") or "–"),
+        _kv("Deler",         obj.get("num_parts") or "–"),
+        _kv("Minifigurer",   obj.get("num_minifigs") or "–"),
+    ]
+    _wear = obj.get("wear_level")
+    _mangler = COMPLETENESS_LABEL.get(obj.get("completeness_level") or "UNKNOWN", "–")
+    right_rows = [
+        _kv("Bruksspor",      WEAR_LABEL.get(_wear, "–") if _wear else "–"),
+        _kv("Instruksjoner",  "Ja" if obj.get("has_instructions") else "Nei"),
+        _kv("Original boks",  "Ja" if obj.get("has_original_box") else "Nei"),
+        _kv("Mangler noe?",   _mangler),
+        _kv("Lokasjon",       obj.get("location_name") or "–"),
+        _kv("Sub-lokasjon",   obj.get("sub_location") or "–"),
+    ]
+    c_l, c_r = st.columns(2)
+    with c_l:
+        st.markdown("".join(left_rows), unsafe_allow_html=True)
+    with c_r:
+        st.markdown("".join(right_rows), unsafe_allow_html=True)
+
+    if obj.get("notes"):
+        st.markdown("**Notater**")
+        st.caption(obj["notes"])
+
+    # Purchase info (only if present)
+    if obj.get("purchase_price") or obj.get("purchase_date") or obj.get("purchase_source"):
+        st.divider()
+        st.markdown("**Kjøpt**")
+        parts = []
+        if obj.get("purchase_price"):
+            cur = obj.get("purchase_currency") or "NOK"
+            parts.append(f"{int(obj['purchase_price'])} {cur}")
+        if obj.get("purchase_date"):
+            parts.append(obj["purchase_date"])
+        if obj.get("purchase_source"):
+            parts.append(obj["purchase_source"])
+        st.caption(" · ".join(parts))
+
+    if obj.get("registered_at"):
+        st.caption(f"📅 Registrert: {obj['registered_at']}")
+
+    st.divider()
+    col_edit, col_close = st.columns([2, 1])
+    with col_edit:
+        if st.button("✏️ Rediger", type="primary", use_container_width=True,
+                     key=f"detail_edit_{oid}"):
+            st.session_state["pending_edit_oid"] = oid
+            st.session_state["last_shown_oid"]   = None
+            st.rerun()
+    with col_close:
+        if st.button("Lukk", use_container_width=True, key=f"detail_close_{oid}"):
+            st.session_state["last_shown_oid"] = None
+            st.rerun()
+
+
 @st.dialog("Rediger objekt", width="large")
 def edit_dialog(obj: dict, loc_list: list):
     oid = obj.get("ownership_id", "")
-    dok = DOK_LABEL.get(obj.get("quality_level", "BASIC"), "⚪ Registrert")
-    st.caption(f"**{oid}** · {dok} · Registrert: {obj.get('registered_at', '–')}")
+    compact_id, full_id = fmt_bh_id(oid)
+    # Big, readable compact ID. Full BH-ID lives one line below as a muted
+    # reference (needed for the delete guard, copy-paste into support etc.).
+    st.markdown(
+        f"### {compact_id}  "
+        f"<span style='color:#888;font-weight:normal;font-size:0.75em'>"
+        f"({full_id})</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Registrert: {obj.get('registered_at', '–')}")
 
     # Show BrickLink official name and IDs
     bl_full = obj.get("name_bl")
@@ -1044,9 +1209,22 @@ def edit_dialog(obj: dict, loc_list: list):
     col1, col2 = st.columns(2)
     with col1:
         is_moc = obj.get("object_type") in ("MOC", "MOD")
-        name = st.text_input("Navn *", value=obj.get("name") or "",
-                             disabled=not is_moc,
-                             help="Navn kan kun redigeres for MOC og Mod. BL-navn vises automatisk i samlingsoversikten." if not is_moc else None)
+        if is_moc:
+            name = st.text_input("Navn *", value=obj.get("name") or "")
+        else:
+            # Read-only visual rendering with good contrast — a disabled
+            # text_input is hard to read, so we show the name as a labelled
+            # markdown block and stash the value for the save path.
+            name_val = display_name(obj) or "–"
+            st.markdown("**Navn**")
+            st.markdown(
+                f"<div style='padding:6px 10px;border:1px solid #d0d0d0;"
+                f"border-radius:6px;background:#f6f7fb;color:#111;"
+                f"font-weight:500'>{html.escape(name_val)}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Navn hentes fra BrickLink / Rebrickable og kan kun redigeres for MOC og MOD.")
+            name = obj.get("name") or ""
         set_number_edit = st.text_input("Settnummer", value=obj.get("set_number") or "",
                                         help="Ditt logiske settnummer, f.eks. 71011-16 for Queen i Series 15.")
         bl_item_no_edit = st.text_input("BrickLink Item-nr",
@@ -1073,17 +1251,17 @@ def edit_dialog(obj: dict, loc_list: list):
                                  index=cond_idx,
                                  format_func=lambda x: CONDITION_LABEL[x])
 
-        # Slitasjegrad (collector grading) — only meaningful for non-sealed
+        # Bruksspor (per-unit grading) — only meaningful for non-sealed
         if condition in _WEAR_RELEVANT_CONDITIONS:
             wear_keys = ["(ingen)"] + list(WEAR_LABEL.keys())
             cur_wear  = obj.get("wear_level")
             wear_idx  = wear_keys.index(cur_wear) if cur_wear in wear_keys else 0
             wear_pick = st.selectbox(
-                "Slitasjegrad",
+                "Bruksspor",
                 wear_keys,
                 index=wear_idx,
                 format_func=lambda x: WEAR_LABEL[x] if x in WEAR_LABEL else "– Ikke satt –",
-                help="Per-unit slitasjegrad for brukte sett. Fra 'Som ny' til 'Akseptabel'.",
+                help="Hvor slitt ditt eksemplar er — fra 'Som ny' til 'Akseptabel'.",
             )
             wear_level_val = wear_pick if wear_pick in WEAR_LABEL else None
         else:
@@ -1124,20 +1302,20 @@ def edit_dialog(obj: dict, loc_list: list):
         cur_compl = obj.get("completeness_level") or "UNKNOWN"
         if cur_compl not in compl_keys:
             cur_compl = "UNKNOWN"
-        completeness = st.selectbox("Kompletthetsgrad", compl_keys,
+        completeness = st.selectbox("Mangler noe?", compl_keys,
                                      index=compl_keys.index(cur_compl),
-                                     format_func=lambda x: COMPLETENESS_LABEL[x])
+                                     format_func=lambda x: COMPLETENESS_LABEL[x],
+                                     help="Mangler det deler, instruksjoner eller minifigurer?")
 
     # ── Documentation image ───────────────────────────────────────────────────
-    st.subheader("📷 Dokumentasjonsbilde")
+    st.subheader("📷 Bilde")
     obj_uuid = obj.get("id")
     if obj_uuid:
         existing_img = fetch_object_image(obj_uuid)
         if existing_img:
             st.image(image_public_url(existing_img["storage_path"]), width=280)
-            st.caption(f"🔵 Documented")
         else:
-            st.caption("Ingen bilde lastet opp ennå — ⚪ Basic")
+            st.caption("Ingen bilde lastet opp ennå.")
         new_img = st.file_uploader(
             "Last opp bilde (erstatter eventuelt eksisterende)",
             type=["jpg", "jpeg", "png", "webp"],
@@ -1148,7 +1326,7 @@ def edit_dialog(obj: dict, loc_list: list):
                 with st.spinner("Laster opp ..."):
                     ok = save_documentation_image(obj_uuid, oid, new_img.read(), new_img.type)
                 if ok:
-                    st.success("📷 Bilde lagret — 🔵 Documented!")
+                    st.success("📷 Bilde lagret!")
                     st.rerun()
                 else:
                     st.error("Opplasting feilet. Sjekk at storage-bucket er opprettet i Supabase.")
@@ -1484,7 +1662,7 @@ with tab_collection:
                 "Tilstand": CONDITION_LABEL.get(o.get("condition", ""), "–"),
                 "Verdi":    fmt_nok(o.get("estimated_value_bl")),
                 "Lokasjon": o.get("location_name", "–"),
-                "ID":       o.get("ownership_id", ""),
+                "ID":       fmt_bh_id(o.get("ownership_id", ""))[0],
             } for o in objs]
 
         _col_config = {
@@ -1512,9 +1690,13 @@ with tab_collection:
                 obj = filtered[selected[0]]
                 obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
                 _oid = obj.get("ownership_id")
-                if st.session_state.get("last_shown_oid") != _oid:
-                    st.session_state["last_shown_oid"] = _oid
+                if st.session_state.get("pending_edit_oid") == _oid:
+                    st.session_state["pending_edit_oid"] = None
+                    st.session_state["last_shown_oid"]   = _oid
                     edit_dialog(obj, loc_list)
+                elif st.session_state.get("last_shown_oid") != _oid:
+                    st.session_state["last_shown_oid"] = _oid
+                    detail_dialog(obj, loc_list)
             else:
                 st.session_state["last_shown_oid"] = None
         else:
@@ -1566,9 +1748,13 @@ with tab_collection:
                         obj = grp_objs[selected[0]]
                         obj["location_name"] = loc_by_id.get(obj.get("location_id"), "– Ingen –")
                         _oid = obj.get("ownership_id")
-                        if st.session_state.get("last_shown_oid") != _oid:
-                            st.session_state["last_shown_oid"] = _oid
+                        if st.session_state.get("pending_edit_oid") == _oid:
+                            st.session_state["pending_edit_oid"] = None
+                            st.session_state["last_shown_oid"]   = _oid
                             edit_dialog(obj, loc_list)
+                        elif st.session_state.get("last_shown_oid") != _oid:
+                            st.session_state["last_shown_oid"] = _oid
+                            detail_dialog(obj, loc_list)
 
             if not _any_selected:
                 st.session_state["last_shown_oid"] = None
@@ -2097,6 +2283,36 @@ with tab_register:
         else:
             # Sealed → wear_level is not meaningful; clear any stale value
             st.session_state["reg_wear_level"] = None
+
+        # ── Innhold & komplettering ──────────────────────────────────────
+        st.markdown("**Innhold**")
+        ic1, ic2 = st.columns(2)
+        with ic1:
+            reg_has_instructions = st.toggle(
+                "Har instruksjoner",
+                key="reg_has_instructions",
+                help="Er den originale byggeinstruksjonen med?",
+            )
+        with ic2:
+            reg_has_original_box = st.toggle(
+                "Har original boks",
+                key="reg_has_original_box",
+                help="Er den originale esken med?",
+            )
+        _compl_keys  = list(COMPLETENESS_LABEL.keys())
+        _cur_compl   = st.session_state.get("reg_completeness") or "UNKNOWN"
+        if _cur_compl not in _compl_keys:
+            _cur_compl = "UNKNOWN"
+        reg_completeness = st.selectbox(
+            "Mangler noe?",
+            _compl_keys,
+            index=_compl_keys.index(_cur_compl),
+            format_func=lambda x: COMPLETENESS_LABEL[x],
+            help="Mangler det deler, instruksjoner eller minifigurer?",
+            key="reg_completeness_pick",
+        )
+        st.session_state["reg_completeness"] = reg_completeness
+
         notes       = st.text_area("Notater", placeholder="Fri tekst ...")
 
         col_back, col_next = st.columns(2)
@@ -2124,6 +2340,9 @@ with tab_register:
                         "num_parts":   st.session_state.get("rb_parts"),
                         "num_minifigs": st.session_state.get("rb_minifigs"),
                         "is_built":    condition in ("BUILT", "USED"),
+                        "has_instructions":   reg_has_instructions,
+                        "has_original_box":   reg_has_original_box,
+                        "completeness_level": reg_completeness,
                     }
                     st.session_state["reg_step"] = 3
                     st.rerun()
