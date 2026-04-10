@@ -57,7 +57,7 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
     Returns: {"set_number": str|None, "name": str|None, "confidence": "high"|"medium"|"low", "note": str}
     """
     if not ANTHROPIC_API_KEY:
-        return {"set_number": None, "name": None, "wear_level": None,
+        return {"set_number": None, "name": None, "year": None, "wear_level": None,
                 "wear_note": None, "note": "ANTHROPIC_API_KEY ikke satt."}
     try:
         small_bytes, media_type = _resize_image(image_bytes, content_type)
@@ -66,7 +66,8 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",  # Haiku: ~12× billigere enn Sonnet, tilstrekkelig for settgjenkjenning
-            max_tokens=200,                      # Litt større siden vi nå også vurderer slitasje
+            max_tokens=220,                      # Litt større siden vi nå også vurderer slitasje + year
+            temperature=0,                       # Determinisme: samme bilde skal gi samme svar
             messages=[{
                 "role": "user",
                 "content": [
@@ -79,16 +80,27 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
                         "text": (
                             "Du er ekspert på Lego-sett. Se på dette bildet – det kan vise en "
                             "Lego-eske, en åpen ubygget pakke, eller et ferdig bygget sett.\n\n"
-                            "Gjør to vurderinger:\n"
+                            "Gjør tre vurderinger:\n"
                             "1. Identifiser settnummeret hvis mulig.\n"
-                            "2. Anslå slitasjegrad ut fra det du ser (støv, riper, mangler, "
+                            "2. Anslå omtrentlig utgivelsesår (for å hjelpe å skille mellom "
+                            "original og reissue av samme modell).\n"
+                            "3. Anslå slitasjegrad ut fra det du ser (støv, riper, mangler, "
                             "esketilstand, klistremerker). Bare for åpne/byggede sett — "
                             "for forseglede esker, returner null.\n\n"
+                            "VIKTIG — reissue-regel: Hvis samme fysiske modell finnes både som "
+                            "original og som senere reissue / jubileumsutgave, foretrekk den "
+                            "NYESTE utgaven (f.eks. 40370 '40 Years of LEGO Trains' fremfor "
+                            "originalen 7810), MED MINDRE bildet tydelig viser originalens "
+                            "vintage-eske, vintage-klossfarger eller andre spor som bekrefter "
+                            "at dette er originalen. Moderne klossfarger / ren eske / moderne "
+                            "trykk tyder på reissue.\n\n"
                             "Svar KUN med et JSON-objekt, ingen annen tekst:\n"
-                            '{"set_number": "75192", "name": "Millennium Falcon", '
-                            '"wear_level": "NEAR_MINT", "wear_note": "Lett støv, ellers ren"}\n\n'
+                            '{"set_number": "40370", "name": "40 Years of LEGO Trains", '
+                            '"year": 2020, "wear_level": "NEAR_MINT", '
+                            '"wear_note": "Lett støv, ellers ren"}\n\n'
                             "Sett-nummeret skal kun inneholde tall og bindestrek, "
                             "f.eks. \"75192\" eller \"71011-8\".\n"
+                            "year: heltall eller null hvis helt usikker.\n"
                             "wear_level: én av MINT, NEAR_MINT, VERY_GOOD, GOOD, FAIR — eller null "
                             "hvis bildet ikke gir grunnlag (forseglet eske, dårlig vinkel).\n"
                             "wear_note: kort begrunnelse på norsk (maks 60 tegn) eller null.\n"
@@ -108,15 +120,16 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
         return {
             "set_number":  result.get("set_number"),
             "name":        result.get("name"),
+            "year":        result.get("year"),
             "wear_level":  result.get("wear_level"),
             "wear_note":   result.get("wear_note"),
             "note":        "",
         }
     except json.JSONDecodeError:
-        return {"set_number": None, "name": None, "wear_level": None,
+        return {"set_number": None, "name": None, "year": None, "wear_level": None,
                 "wear_note": None, "note": "Kunne ikke tolke svar fra AI."}
     except Exception as e:
-        return {"set_number": None, "name": None, "wear_level": None,
+        return {"set_number": None, "name": None, "year": None, "wear_level": None,
                 "wear_note": None, "note": f"Feil: {e}"}
 
 SB_HEADERS = {
