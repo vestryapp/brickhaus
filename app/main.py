@@ -16,14 +16,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 from requests_oauthlib import OAuth1
+import hashlib as _hashlib
+import base64 as _b64
+import secrets as _secrets
+import urllib.parse as _urlparse
 import streamlit as st
 from PIL import Image, ImageDraw
 import anthropic
+from supabase import create_client as _sb_create_client
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-SUPABASE_URL    = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_KEY    = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_URL      = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY      = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+APP_URL           = os.environ.get("APP_URL", "http://localhost:8501")
 REBRICKABLE_KEY     = os.environ.get("REBRICKABLE_API_KEY", "")
 BL_CONSUMER_KEY     = os.environ.get("BRICKLINK_CONSUMER_KEY", "")
 BL_CONSUMER_SECRET  = os.environ.get("BRICKLINK_CONSUMER_SECRET", "")
@@ -170,6 +177,76 @@ def _lego_icon_b64(size: int = 40) -> str:
 
 
 st.set_page_config(page_title="BrickHaus", page_icon=_make_lego_icon(64), layout="wide")
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def _auth_client():
+    return _sb_create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+def _pkce_pair():
+    """Generer code_verifier og code_challenge for PKCE-flyten."""
+    verifier = _secrets.token_urlsafe(64)
+    challenge = _b64.urlsafe_b64encode(
+        _hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    return verifier, challenge
+
+# PKCE-flyt: vi sender code_verifier med i redirect_to-URL-en (?cv=...)
+# slik at den kommer tilbake i callback sammen med code — ingen serverside state nødvendig.
+_qp = st.query_params
+
+if "code" in _qp and "user" not in st.session_state:
+    _code = _qp["code"]
+    _cv   = _qp.get("cv", "")
+    if _cv:
+        try:
+            _session = _auth_client().auth.exchange_code_for_session({
+                "auth_code":     _code,
+                "code_verifier": _cv,
+            })
+            st.session_state["user"]         = _session.user
+            st.session_state["access_token"] = _session.session.access_token
+            st.query_params.clear()
+            st.rerun()
+        except Exception as _e:
+            st.error(f"Innlogging feilet: {_e}")
+            st.stop()
+    else:
+        st.error("Manglende code verifier — vennligst prøv å logge inn på nytt.")
+        st.stop()
+
+# Auth gate — vis innloggingsside hvis ikke autentisert
+if "user" not in st.session_state:
+    st.markdown("""
+        <div style="display:flex;flex-direction:column;align-items:center;
+                    justify-content:center;height:55vh;gap:16px;text-align:center">
+            <h1>🧱 BrickHaus</h1>
+            <p style="color:#888;font-size:1.1rem">Din LEGO-samling, organisert.</p>
+        </div>
+    """, unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("Logg inn med Google", use_container_width=True, type="primary"):
+            _verifier, _challenge = _pkce_pair()
+            _redirect = f"{APP_URL}?cv={_verifier}"
+            _params = _urlparse.urlencode({
+                "provider":              "google",
+                "redirect_to":           _redirect,
+                "code_challenge":        _challenge,
+                "code_challenge_method": "S256",
+                "scopes":                "email profile",
+            })
+            _auth_url = f"{SUPABASE_URL}/auth/v1/authorize?{_params}"
+            st.markdown(
+                f'<meta http-equiv="refresh" content="0;url={_auth_url}">',
+                unsafe_allow_html=True,
+            )
+            st.stop()
+    st.stop()
+
+# Bruker er logget inn
+_current_user = st.session_state["user"]
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
