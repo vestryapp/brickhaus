@@ -29,7 +29,7 @@ SUPABASE_URL    = os.environ["SUPABASE_URL"].strip().rstrip("/")
 SUPABASE_KEY    = os.environ["SUPABASE_SERVICE_KEY"].strip()
 GOOGLE_SA_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"].strip()
 
-DRIVE_FOLDER_ID = "1OW8kPSr0uv-hWurbiv89RibY49V0087l"   # BrickHaus/Backups
+DRIVE_FOLDER_ID = "1-IdmNlNI4XU1BhkQxLtFGu4rRfIng_yo"   # BrickHaus/Backups
 TABLES          = ["objects", "locations", "tags", "images"]
 KEEP_BACKUPS    = 8   # keep last 8 weekly backups (~2 months)
 
