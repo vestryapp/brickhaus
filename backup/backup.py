@@ -25,9 +25,9 @@ from googleapiclient.http import MediaFileUpload
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SUPABASE_URL    = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_KEY    = os.environ["SUPABASE_SERVICE_KEY"]
-GOOGLE_SA_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+SUPABASE_URL    = os.environ["SUPABASE_URL"].strip().rstrip("/")
+SUPABASE_KEY    = os.environ["SUPABASE_SERVICE_KEY"].strip()
+GOOGLE_SA_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"].strip()
 
 DRIVE_FOLDER_ID = "1OW8kPSr0uv-hWurbiv89RibY49V0087l"   # BrickHaus/Backups
 TABLES          = ["objects", "locations", "tags", "images"]
