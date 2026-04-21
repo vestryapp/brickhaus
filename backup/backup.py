@@ -7,9 +7,11 @@ Usage:
     python backup/backup.py
 
 Required environment variables:
-    SUPABASE_URL                  – Supabase project URL
-    SUPABASE_SERVICE_KEY          – Supabase service role key
-    GOOGLE_SERVICE_ACCOUNT_JSON   – Full JSON content of the Google service account key
+    SUPABASE_URL           – Supabase project URL
+    SUPABASE_SERVICE_KEY   – Supabase service role key
+    GOOGLE_CLIENT_ID       – OAuth2 client ID
+    GOOGLE_CLIENT_SECRET   – OAuth2 client secret
+    GOOGLE_REFRESH_TOKEN   – OAuth2 refresh token (obtained via backup/get_refresh_token.py)
 """
 
 import gzip
@@ -19,15 +21,17 @@ import tempfile
 from datetime import date, datetime, timezone
 
 import requests
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SUPABASE_URL    = os.environ["SUPABASE_URL"].strip().rstrip("/")
-SUPABASE_KEY    = os.environ["SUPABASE_SERVICE_KEY"].strip()
-GOOGLE_SA_JSON  = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"].strip()
+SUPABASE_URL      = os.environ["SUPABASE_URL"].strip().rstrip("/")
+SUPABASE_KEY      = os.environ["SUPABASE_SERVICE_KEY"].strip()
+GOOGLE_CLIENT_ID  = os.environ["GOOGLE_CLIENT_ID"].strip()
+GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"].strip()
+GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"].strip()
 
 DRIVE_FOLDER_ID = "1-IdmNlNI4XU1BhkQxLtFGu4rRfIng_yo"   # BrickHaus/Backups
 TABLES          = ["objects", "locations", "tags", "images"]
@@ -66,9 +70,14 @@ def fetch_table(table: str) -> list:
 # ── Google Drive helpers ──────────────────────────────────────────────────────
 
 def build_drive_service():
-    sa_info = json.loads(GOOGLE_SA_JSON)
-    creds   = service_account.Credentials.from_service_account_info(
-        sa_info, scopes=["https://www.googleapis.com/auth/drive"]
+    """Build Drive service using OAuth2 user credentials (refresh token)."""
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=["https://www.googleapis.com/auth/drive"],
     )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
