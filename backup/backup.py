@@ -33,7 +33,7 @@ GOOGLE_CLIENT_ID  = os.environ["GOOGLE_CLIENT_ID"].strip()
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"].strip()
 GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"].strip()
 
-DRIVE_FOLDER_ID = "1-IdmNlNI4XU1BhkQxLtFGu4rRfIng_yo"   # BrickHaus/Backups
+DRIVE_FOLDER_ID = "1OW8kPSr0uv-hWurbiv89RibY49V0087l"   # BrickHaus/Backups
 TABLES          = ["objects", "locations", "tags", "images"]
 KEEP_BACKUPS    = 8   # keep last 8 weekly backups (~2 months)
 
