@@ -59,22 +59,35 @@ def _resize_image(image_bytes: bytes, content_type: str) -> tuple[bytes, str]:
 
 def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
     """
-    Use Claude Vision (Haiku) to identify a Lego set from an image (box or built set).
-    Image is resized before sending to minimise token cost.
-    Returns: {"set_number": str|None, "name": str|None, "confidence": "high"|"medium"|"low", "note": str}
+    Use Claude Vision (Haiku) to identify any LEGO object from an image.
+    Handles sets, minifigs, parts, bulk, boxes, instructions, etc.
+    Returns: {
+      "type_guess": str,           # SET|MINIFIG|PART|BULK|INSTRUCTION|BOX|GEAR|MOC|CATALOG|OTHER
+      "set_number": str|None,      # set/part number if identified
+      "name": str|None,
+      "year": int|None,
+      "wear_level": str|None,
+      "wear_note": str|None,
+      "part_description": str|None,  # for PART: "2x4 brick, red" style description for RB search
+      "part_search_query": str|None, # short search term for Rebrickable parts API
+      "confidence": str,           # "high"|"medium"|"low"
+      "note": str
+    }
     """
     if not ANTHROPIC_API_KEY:
-        return {"set_number": None, "name": None, "year": None, "wear_level": None,
-                "wear_note": None, "note": "ANTHROPIC_API_KEY ikke satt."}
+        return {"type_guess": "OTHER", "set_number": None, "name": None, "year": None,
+                "wear_level": None, "wear_note": None, "part_description": None,
+                "part_search_query": None, "confidence": "low",
+                "note": "ANTHROPIC_API_KEY ikke satt."}
     try:
         small_bytes, media_type = _resize_image(image_bytes, content_type)
         img_b64 = base64.standard_b64encode(small_bytes).decode("utf-8")
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",  # Haiku: ~12× billigere enn Sonnet, tilstrekkelig for settgjenkjenning
-            max_tokens=220,                      # Litt større siden vi nå også vurderer slitasje + year
-            temperature=0,                       # Determinisme: samme bilde skal gi samme svar
+            model="claude-haiku-4-5-20251001",
+            max_tokens=350,
+            temperature=0,
             messages=[{
                 "role": "user",
                 "content": [
@@ -85,59 +98,71 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
                     {
                         "type": "text",
                         "text": (
-                            "Du er ekspert på Lego-sett. Se på dette bildet – det kan vise en "
-                            "Lego-eske, en åpen ubygget pakke, eller et ferdig bygget sett.\n\n"
-                            "Gjør tre vurderinger:\n"
-                            "1. Identifiser settnummeret hvis mulig.\n"
-                            "2. Anslå omtrentlig utgivelsesår (for å hjelpe å skille mellom "
-                            "original og reissue av samme modell).\n"
-                            "3. Anslå slitasjegrad ut fra det du ser (støv, riper, mangler, "
-                            "esketilstand, klistremerker). Bare for åpne/byggede sett — "
-                            "for forseglede esker, returner null.\n\n"
-                            "VIKTIG — reissue-regel: Hvis samme fysiske modell finnes både som "
-                            "original og som senere reissue / jubileumsutgave, foretrekk den "
-                            "NYESTE utgaven (f.eks. 40370 '40 Years of LEGO Trains' fremfor "
-                            "originalen 7810), MED MINDRE bildet tydelig viser originalens "
-                            "vintage-eske, vintage-klossfarger eller andre spor som bekrefter "
-                            "at dette er originalen. Moderne klossfarger / ren eske / moderne "
-                            "trykk tyder på reissue.\n\n"
-                            "Svar KUN med et JSON-objekt, ingen annen tekst:\n"
-                            '{"set_number": "40370", "name": "40 Years of LEGO Trains", '
-                            '"year": 2020, "wear_level": "NEAR_MINT", '
-                            '"wear_note": "Lett støv, ellers ren"}\n\n'
-                            "Sett-nummeret skal kun inneholde tall og bindestrek, "
-                            "f.eks. \"75192\" eller \"71011-8\".\n"
-                            "year: heltall eller null hvis helt usikker.\n"
-                            "wear_level: én av MINT, NEAR_MINT, VERY_GOOD, GOOD, FAIR — eller null "
-                            "hvis bildet ikke gir grunnlag (forseglet eske, dårlig vinkel).\n"
-                            "wear_note: kort begrunnelse på norsk (maks 60 tegn) eller null.\n"
-                            "Hvis du ikke kan identifisere settet, bruk null for set_number og name."
+                            "Du er ekspert på LEGO. Se på dette bildet og identifiser hva det viser.\n\n"
+                            "Bildet kan vise ET AV DISSE:\n"
+                            "- SET: en LEGO-eske, ferdig bygget sett eller uåpnet pakke\n"
+                            "- MINIFIG: én eller flere minifigurer\n"
+                            "- PART: én eller noen få løse LEGO-deler (klosser, plater, skinner etc.)\n"
+                            "- BULK: en boks, pose eller haug med blandet LEGO\n"
+                            "- INSTRUCTION: en instruksjonsbok/-hefte\n"
+                            "- BOX: en tom LEGO-eske uten innhold\n"
+                            "- GEAR: LEGO merchandise (klær, vesker, klokker etc.)\n"
+                            "- CATALOG: LEGO-katalog\n"
+                            "- MOC: tydelig egenbygd modell (ikke fra offisiell eske)\n"
+                            "- OTHER: ukjent\n\n"
+                            "Gjør disse vurderingene:\n"
+                            "1. Hvilken type er dette? (type_guess)\n"
+                            "2. SET/MINIFIG: identifiser settnummer hvis mulig.\n"
+                            "3. PART: beskriv delen (form, studmønster, kategori) og en kort "
+                            "søketerm egnet for Rebrickable (f.eks. '2x4 brick' eller 'curved slope 2x1').\n"
+                            "4. Anslå år hvis relevant.\n"
+                            "5. Slitasjegrad (kun for åpne/byggede objekter, null for forseglede).\n\n"
+                            "VIKTIG — reissue-regel for SET: foretrekk nyeste utgave MED MINDRE "
+                            "bildet viser vintage-eske eller vintage-klossfarger.\n\n"
+                            "Svar KUN med JSON, ingen annen tekst:\n"
+                            '{"type_guess":"SET","set_number":"75192","name":"Millennium Falcon",'
+                            '"year":2017,"wear_level":"NEAR_MINT","wear_note":"Lett støv",'
+                            '"part_description":null,"part_search_query":null,"confidence":"high"}\n\n'
+                            "Felt-regler:\n"
+                            "type_guess: én av SET|MINIFIG|PART|BULK|INSTRUCTION|BOX|GEAR|CATALOG|MOC|OTHER\n"
+                            "set_number: tall og bindestrek kun, f.eks. '75192' eller '71011-8', ellers null\n"
+                            "part_description: norsk/engelsk beskrivelse av del-type og farge, null hvis ikke PART\n"
+                            "part_search_query: 2-4 ord egnet for søk i Rebrickable (engelsk), null hvis ikke PART\n"
+                            "confidence: 'high' hvis sikker, 'medium' hvis noenlunde, 'low' hvis usikker\n"
+                            "wear_level: MINT|NEAR_MINT|VERY_GOOD|GOOD|FAIR eller null\n"
+                            "wear_note: maks 60 tegn norsk eller null"
                         ),
                     },
                 ],
             }],
         )
         raw = msg.content[0].text.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
         result = json.loads(raw.strip())
         return {
-            "set_number":  result.get("set_number"),
-            "name":        result.get("name"),
-            "year":        result.get("year"),
-            "wear_level":  result.get("wear_level"),
-            "wear_note":   result.get("wear_note"),
-            "note":        "",
+            "type_guess":        result.get("type_guess", "OTHER"),
+            "set_number":        result.get("set_number"),
+            "name":              result.get("name"),
+            "year":              result.get("year"),
+            "wear_level":        result.get("wear_level"),
+            "wear_note":         result.get("wear_note"),
+            "part_description":  result.get("part_description"),
+            "part_search_query": result.get("part_search_query"),
+            "confidence":        result.get("confidence", "low"),
+            "note":              "",
         }
     except json.JSONDecodeError:
-        return {"set_number": None, "name": None, "year": None, "wear_level": None,
-                "wear_note": None, "note": "Kunne ikke tolke svar fra AI."}
+        return {"type_guess": "OTHER", "set_number": None, "name": None, "year": None,
+                "wear_level": None, "wear_note": None, "part_description": None,
+                "part_search_query": None, "confidence": "low",
+                "note": "Kunne ikke tolke svar fra AI."}
     except Exception as e:
-        return {"set_number": None, "name": None, "year": None, "wear_level": None,
-                "wear_note": None, "note": f"Feil: {e}"}
+        return {"type_guess": "OTHER", "set_number": None, "name": None, "year": None,
+                "wear_level": None, "wear_note": None, "part_description": None,
+                "part_search_query": None, "confidence": "low", "note": f"Feil: {e}"}
 
 SB_HEADERS = {
     "apikey":        SUPABASE_KEY,
@@ -800,6 +825,41 @@ def rb_search_mocs(query: str) -> list:
         return []
 
 
+def rb_search_parts(query: str, page_size: int = 12) -> list:
+    """Search Rebrickable parts by name or part number.
+    Returns list of {part_num, name, part_img_url, part_url}.
+    """
+    try:
+        r = requests.get(
+            "https://rebrickable.com/api/v3/lego/parts/",
+            headers=RB_HEADERS,
+            params={"search": query, "page_size": page_size},
+            timeout=10,
+        )
+        if not r.ok:
+            return []
+        return r.json().get("results", [])
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400)   # colors rarely change — cache 24 h
+def rb_fetch_colors() -> list:
+    """Fetch all Rebrickable colors. Returns list of {id, name, rgb, is_trans}."""
+    try:
+        results, url = [], "https://rebrickable.com/api/v3/lego/colors/?page_size=200"
+        while url:
+            r = requests.get(url, headers=RB_HEADERS, timeout=10)
+            if not r.ok:
+                break
+            data = r.json()
+            results.extend(data.get("results", []))
+            url = data.get("next")
+        return results
+    except Exception:
+        return []
+
+
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
@@ -809,7 +869,7 @@ def fetch_objects():
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/objects",
             headers={**SB_HEADERS, "Range-Unit": "items", "Range": f"{offset}-{offset+limit-1}"},
-            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,wear_level,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,num_minifigs,is_built,has_instructions,has_original_box,completeness_level,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id"},
+            params={"select": "id,ownership_id,object_type,set_number,bl_item_no,name,name_bl,theme,subtheme,year,condition,wear_level,status,location_id,sub_location,estimated_value_bl,total_cost_nok,quality_level,notes,insured,purchase_price,purchase_currency,purchase_date,purchase_source,registered_at,num_parts,num_minifigs,is_built,has_instructions,has_original_box,completeness_level,moc_base_set,instructions_url,instructions_storage_path,rebrickable_moc_id,parent_object_id,weight_kg,part_color_id,part_color_name"},
         )
         chunk = r.json()
         # Defensive: PostgREST returns a dict with {code, message, details, hint}
@@ -1116,7 +1176,16 @@ def reset_registration():
             "reg_input_mode","reg_ai_result","moc_prefill","moc_rb_results",
             "reg_uploaded_img_bytes","reg_uploaded_img_type",
             "reg_last_img_file_id","reg_condition","reg_wear_level",
-            "bl_name_secondary"]
+            "bl_name_secondary",
+            # Part flow
+            "reg_part_result","reg_part_search_results","reg_part_color_id",
+            "reg_part_color_name","reg_part_qty",
+            # Bulk flow
+            "reg_bulk_name","reg_bulk_notes","reg_bulk_weight",
+            # MOD flow
+            "reg_mod_parent_id","reg_mod_parent_name","reg_mod_search_results",
+            "reg_mod_base_set_text",
+            ]
     for k in keys:
         st.session_state[k] = None
     st.session_state["rb_year"]  = date.today().year
@@ -1244,13 +1313,29 @@ def detail_dialog(obj: dict, loc_list: list):
         st.caption(f"📅 Registrert: {obj['registered_at']}")
 
     st.divider()
-    col_edit, col_close = st.columns([2, 1])
+    _is_set = obj.get("object_type") == "SET"
+    if _is_set:
+        col_edit, col_mod, col_close = st.columns([2, 2, 1])
+    else:
+        col_edit, col_close = st.columns([2, 1])
     with col_edit:
         if st.button("✏️ Rediger", type="primary", use_container_width=True,
                      key=f"detail_edit_{oid}"):
             st.session_state["pending_edit_oid"] = oid
             st.session_state["last_shown_oid"]   = None
             st.rerun()
+    if _is_set:
+        with col_mod:
+            if st.button("🔧 Legg til MOD", use_container_width=True,
+                         key=f"detail_add_mod_{oid}"):
+                reset_registration()
+                st.session_state["reg_input_mode"]     = "mod"
+                st.session_state["reg_mod_parent_id"]  = obj.get("id")
+                st.session_state["reg_mod_parent_name"] = (
+                    f"{obj.get('set_number','?')} – {display_name(obj)}"
+                )
+                st.session_state["last_shown_oid"] = None
+                st.rerun()
     with col_close:
         if st.button("Lukk", use_container_width=True, key=f"detail_close_{oid}"):
             st.session_state["last_shown_oid"] = None
@@ -1869,6 +1954,13 @@ with tab_register:
                 col.markdown(f"<div style='text-align:center;color:#aaa'>{label}</div>",
                              unsafe_allow_html=True)
 
+    # ── Global Avbryt — shown in all steps once a flow is active ─────────────
+    _in_reg_flow = (step > 1 or st.session_state.get("reg_input_mode") is not None)
+    if _in_reg_flow:
+        if st.button("✕ Avbryt registrering", key="reg_cancel_global_top"):
+            reset_registration()
+            st.rerun()
+
     # ── STEP 1: Choose input mode + identify ─────────────────────────────────
     if step == 1:
 
@@ -1935,23 +2027,46 @@ with tab_register:
         # ── Mode selector ─────────────────────────────────────────────────────
         if input_mode is None:
             st.subheader("Registrer nytt objekt")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if st.button("📷  Bilde", use_container_width=True,
+
+            # Top row: two primary entry points
+            top1, top2 = st.columns(2)
+            with top1:
+                if st.button("📷  Gjenkjenn fra foto", use_container_width=True,
                              type="primary", disabled=not ANTHROPIC_API_KEY):
                     st.session_state["reg_input_mode"] = "image"
                     st.rerun()
-                st.caption("Gjenkjenn fra foto" if ANTHROPIC_API_KEY else "Krever ANTHROPIC_API_KEY")
-            with c2:
-                if st.button("🔢  Settnummer", use_container_width=True, type="primary"):
+                st.caption("Alle typer" if ANTHROPIC_API_KEY else "Krever ANTHROPIC_API_KEY")
+            with top2:
+                if st.button("🔢  Søk på nummer", use_container_width=True, type="primary"):
                     st.session_state["reg_input_mode"] = "number"
                     st.rerun()
-                st.caption("Offisielle sett og CMF")
-            with c3:
-                if st.button("🔧  MOC / MOD", use_container_width=True, type="primary"):
+                st.caption("Sett, minifig, del")
+
+            st.write("")
+
+            # Bottom row: four manual entry points
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                if st.button("🧩  Deler", use_container_width=True):
+                    st.session_state["reg_input_mode"] = "part"
+                    st.rerun()
+                st.caption("Løse")
+            with b2:
+                if st.button("📦  Bulk", use_container_width=True):
+                    st.session_state["reg_input_mode"] = "bulk"
+                    st.rerun()
+                st.caption("Blanding")
+            with b3:
+                if st.button("🏗️  MOC", use_container_width=True):
                     st.session_state["reg_input_mode"] = "moc"
                     st.rerun()
-                st.caption("Egne bygg og modifikasjoner")
+                st.caption("Eget bygg")
+            with b4:
+                if st.button("🔧  MOD", use_container_width=True):
+                    st.session_state["reg_input_mode"] = "mod"
+                    st.rerun()
+                st.caption("Modifisert")
+
             st.divider()
             _progress_indicator(step)
 
@@ -1960,17 +2075,14 @@ with tab_register:
             ai_result = st.session_state.get("reg_ai_result")
 
             if ai_result is None:
-                st.subheader("📷 Identifiser med bilde")
-                st.caption("Last opp bilde av eske eller ferdig bygget sett")
+                st.subheader("📷 Gjenkjenn fra foto")
+                st.caption("Last opp bilde av hva som helst — sett, minifig, del, bulk, eske …")
                 img_file = st.file_uploader(
                     "Velg bilde",
                     type=["jpg", "jpeg", "png", "webp"],
                     key="reg_id_img",
                     label_visibility="collapsed",
                 )
-                # Auto-identify as soon as a new file is uploaded — skip the
-                # extra "Identifiser sett" click. Track file_id to avoid
-                # re-running identification on every Streamlit rerun.
                 if img_file is not None:
                     file_id = getattr(img_file, "file_id", None) or img_file.name
                     if st.session_state.get("reg_last_img_file_id") != file_id:
@@ -1981,37 +2093,41 @@ with tab_register:
                         with st.spinner("Analyserer bilde ..."):
                             result = identify_lego_from_image(img_bytes, img_file.type)
                         st.session_state["reg_ai_result"] = result
-                        # Pre-fill wear_level from AI vision so user sees a
-                        # suggestion in step 2 (still required to confirm).
                         ai_wear = result.get("wear_level")
                         if ai_wear in WEAR_LABEL:
                             st.session_state["reg_wear_level"] = ai_wear
-                        # Pre-fetch Rebrickable reference image for visual
-                        # side-by-side verification on next render.
+                        # Pre-fetch RB reference image for SET/MINIFIG
                         sett = result.get("set_number")
-                        if sett:
+                        if sett and result.get("type_guess") in ("SET", "MINIFIG", None):
                             try:
                                 variants = rb_search_variants(sett.split("-")[0])
                                 if variants:
                                     match = next((v for v in variants
                                                   if v.get("set_num") == sett), variants[0])
-                                    result["_rb_img"]  = match.get("set_img_url")
-                                    result["_rb_name"] = match.get("name")
+                                    result["_rb_img"]     = match.get("set_img_url")
+                                    result["_rb_name"]    = match.get("name")
                                     result["_rb_set_num"] = match.get("set_num")
                             except Exception:
                                 pass
+                        # Pre-fetch part candidates for PART type
+                        if result.get("type_guess") == "PART" and result.get("part_search_query"):
+                            try:
+                                result["_part_candidates"] = rb_search_parts(
+                                    result["part_search_query"], page_size=8)
+                            except Exception:
+                                result["_part_candidates"] = []
                         st.rerun()
                     else:
                         st.caption("⏳ Analyserer ...")
             else:
-                sett = ai_result.get("set_number")
-                name = ai_result.get("name")
-                rb_img = ai_result.get("_rb_img")
-                rb_name = ai_result.get("_rb_name")
+                type_guess = ai_result.get("type_guess", "OTHER")
+                sett       = ai_result.get("set_number")
+                name       = ai_result.get("name")
+                rb_img     = ai_result.get("_rb_img")
+                rb_name    = ai_result.get("_rb_name")
 
-                if sett:
-                    # Show user's uploaded photo next to the catalog reference
-                    # so they can verify the match visually — no fake confidence label.
+                # ── SET / MINIFIG with identified number ─────────────────────
+                if type_guess in ("SET", "MINIFIG") and sett:
                     st.caption("**AI-forslag:** sammenlign ditt bilde (venstre) med referansebildet (høyre)")
                     col_user, col_ref = st.columns(2)
                     with col_user:
@@ -2024,46 +2140,102 @@ with tab_register:
                                      use_container_width=True)
                         else:
                             st.info(f"Fant ingen forhåndsvisning for {sett}.")
-
                     st.markdown(f"**Forslag:** {rb_name or name} — `{sett}`")
                     col_yes, col_no = st.columns(2)
                     with col_yes:
                         if st.button("✅ Stemmer — fortsett", type="primary",
                                      use_container_width=True):
                             st.session_state["reg_set_number"] = sett
-                            with st.spinner("Henter settinfo ..."):
+                            with st.spinner("Henter info ..."):
                                 _do_rb_fetch(sett)
                             st.rerun()
                     with col_no:
                         if st.button("❌ Stemmer ikke", use_container_width=True):
-                            st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_ai_result"]        = None
                             st.session_state["reg_last_img_file_id"] = None
-                            st.session_state["reg_input_mode"] = "number"
+                            st.session_state["reg_input_mode"]       = "number"
                             st.rerun()
+
+                # ── PART — show candidate gallery ────────────────────────────
+                elif type_guess == "PART":
+                    part_desc = ai_result.get("part_description", "")
+                    st.info(f"🧩 AI gjenkjente en del: **{part_desc or 'ukjent type'}**")
+                    candidates = ai_result.get("_part_candidates") or []
+                    if candidates:
+                        st.caption("Velg riktig del, eller fortsett manuelt:")
+                        cols_per_row = 4
+                        for row_start in range(0, len(candidates), cols_per_row):
+                            row_parts = candidates[row_start:row_start + cols_per_row]
+                            pcols = st.columns(cols_per_row)
+                            for pcol, p in zip(pcols, row_parts):
+                                with pcol:
+                                    with st.container(border=True):
+                                        if p.get("part_img_url"):
+                                            st.image(p["part_img_url"], use_container_width=True)
+                                        st.caption(f"**{p.get('name','')}**  \n`{p.get('part_num','')}`")
+                                        if st.button("Velg", key=f"img_part_{p.get('part_num','')}",
+                                                     use_container_width=True):
+                                            st.session_state["reg_part_result"]   = p
+                                            st.session_state["reg_input_mode"]    = "part"
+                                            st.session_state["reg_ai_result"]     = None
+                                            st.rerun()
+                    else:
+                        st.caption("Ingen treff på delnummer-søk.")
+                    if st.button("🧩 Søk etter del manuelt", use_container_width=True):
+                        st.session_state["reg_input_mode"] = "part"
+                        st.session_state["reg_ai_result"]  = None
+                        st.rerun()
+
+                # ── Other identified types (BULK, INSTRUCTION, BOX, etc.) ────
+                elif type_guess in ("BULK", "INSTRUCTION", "BOX", "GEAR", "CATALOG", "MOC"):
+                    _type_labels = {
+                        "BULK": "📦 Bulk / blanding",
+                        "INSTRUCTION": "📋 Instruksjonsbok",
+                        "BOX": "🗃️ Tom eske",
+                        "GEAR": "👕 Merchandise / gear",
+                        "CATALOG": "📒 Katalog",
+                        "MOC": "🏗️ MOC / eget bygg",
+                    }
+                    st.info(f"AI gjenkjente: **{_type_labels.get(type_guess, type_guess)}**")
+                    user_bytes = st.session_state.get("reg_uploaded_img_bytes")
+                    if user_bytes:
+                        st.image(user_bytes, width=200)
+                    _mode_map = {"BULK": "bulk", "MOC": "moc"}
+                    _target   = _mode_map.get(type_guess, "number")
+                    col_ok, col_no = st.columns(2)
+                    with col_ok:
+                        if st.button(f"✅ Ja, registrer som {_type_labels.get(type_guess,'dette')}",
+                                     type="primary", use_container_width=True):
+                            st.session_state["reg_input_mode"] = _target
+                            st.session_state["reg_ai_result"]  = None
+                            st.rerun()
+                    with col_no:
+                        if st.button("🔢 Velg type manuelt", use_container_width=True):
+                            st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_input_mode"] = None
+                            st.rerun()
+
+                # ── Fallback: nothing recognised ──────────────────────────────
                 else:
-                    st.warning("Kunne ikke identifisere settet fra bildet.")
+                    st.warning("Kunne ikke identifisere objektet fra bildet.")
                     if ai_result.get("note"):
                         st.caption(ai_result["note"])
-                    if st.button("🔢 Gå til manuelt settnummer", type="primary",
+                    user_bytes = st.session_state.get("reg_uploaded_img_bytes")
+                    if user_bytes:
+                        st.image(user_bytes, width=200)
+                    if st.button("🔢 Gå til manuelt søk", type="primary",
                                  use_container_width=True):
                         st.session_state["reg_ai_result"]  = None
                         st.session_state["reg_input_mode"] = "number"
                         st.rerun()
 
-            if st.button("← Tilbake", use_container_width=True):
-                st.session_state["reg_ai_result"]  = None
-                st.session_state["reg_last_img_file_id"] = None
-                st.session_state["reg_input_mode"] = None
-                # Keep cached bytes — user may still want them as documentation
-                # if they proceed via number path instead.
-                st.rerun()
             st.divider()
             _progress_indicator(step)
 
         # ── Number path ───────────────────────────────────────────────────────
         elif input_mode == "number":
             st.subheader("🔍 Settnummer eller navn")
-            st.caption("Skriv inn et settnummer (f.eks. 75192) eller et settnavn (f.eks. 'Millennium Falcon')")
+            st.caption("Skriv inn settnummer (f.eks. 75192) eller navn (f.eks. 'Millennium Falcon')")
 
             def _on_set_num_change():
                 st.session_state["rb_fetch_trigger"] = True
@@ -2079,29 +2251,20 @@ with tab_register:
 
             if st.session_state.get("rb_fetch_trigger") and set_num.strip():
                 st.session_state["rb_fetch_trigger"] = False
-                # Only persist as set_number if it actually looks like one.
-                # Name queries go through lookup but shouldn't overwrite the
-                # real set_number field until the user picks a match.
                 if _looks_like_set_number(set_num):
                     st.session_state["reg_set_number"] = set_num.strip()
                 with st.spinner("Søker ..."):
                     _do_rb_fetch(set_num.strip())
                 st.rerun()
 
-            col_a, col_b = st.columns([3, 1])
-            with col_a:
-                if st.button("🔍 Søk", use_container_width=True,
-                             type="primary", disabled=not set_num.strip()):
-                    st.session_state["rb_fetch_trigger"] = False
-                    if _looks_like_set_number(set_num):
-                        st.session_state["reg_set_number"] = set_num.strip()
-                    with st.spinner("Søker ..."):
-                        _do_rb_fetch(set_num.strip())
-                    st.rerun()
-            with col_b:
-                if st.button("← Tilbake", use_container_width=True):
-                    st.session_state["reg_input_mode"] = None
-                    st.rerun()
+            if st.button("🔍 Søk", use_container_width=True,
+                         type="primary", disabled=not set_num.strip()):
+                st.session_state["rb_fetch_trigger"] = False
+                if _looks_like_set_number(set_num):
+                    st.session_state["reg_set_number"] = set_num.strip()
+                with st.spinner("Søker ..."):
+                    _do_rb_fetch(set_num.strip())
+                st.rerun()
 
             # ── Variant gallery ───────────────────────────────────────────────
             if st.session_state["rb_status"] == "multiple":
@@ -2135,17 +2298,12 @@ with tab_register:
             st.divider()
             _progress_indicator(step)
 
-        # ── MOC / MOD path ────────────────────────────────────────────────────
+        # ── MOC path (eget bygg) ──────────────────────────────────────────────
         elif input_mode == "moc":
-            st.subheader("🔧 MOC / MOD")
-
-            moc_type = st.radio("Type bygg", ["MOC – eget bygg", "MOD – modifisert sett"],
-                                horizontal=True, key="moc_type_radio")
-            is_mod = moc_type.startswith("MOD")
-
+            st.subheader("🏗️ MOC – eget bygg")
+            st.caption("Registrer noe du har bygget selv")
             st.divider()
 
-            # Rebrickable MOC-søk (valgfritt)
             with st.expander("🔍 Finn i Rebrickable MOC-katalog (valgfritt)"):
                 moc_query = st.text_input("Søk etter MOC-navn eller MOC-ID",
                                           placeholder="f.eks. 'Sopwith Camel' eller 'MOC-12345'",
@@ -2155,7 +2313,6 @@ with tab_register:
                         results = rb_search_mocs(moc_query.strip())
                     st.session_state["moc_rb_results"] = results
                     st.rerun()
-
                 rb_results = st.session_state.get("moc_rb_results", [])
                 if rb_results:
                     st.caption(f"Fant {len(rb_results)} treff:")
@@ -2170,88 +2327,292 @@ with tab_register:
                         with col_btn:
                             if st.button("Velg", key=f"moc_pick_{m.get('moc_id','')}",
                                          use_container_width=True):
-                                st.session_state["moc_prefill"] = m
+                                st.session_state["moc_prefill"]    = m
                                 st.session_state["moc_rb_results"] = []
                                 st.rerun()
                 elif st.session_state.get("moc_rb_results") is not None and moc_query:
                     st.caption("Ingen treff — fyll inn manuelt nedenfor.")
 
-            # Prefill from Rebrickable result
             prefill = st.session_state.get("moc_prefill") or {}
-
-            name = st.text_input("Navn *",
-                                 value=prefill.get("name", ""),
+            name = st.text_input("Navn *", value=prefill.get("name", ""),
                                  placeholder="f.eks. Sopwith Camel 1:24")
-            if is_mod:
-                base_set = st.text_input("Basert på sett",
-                                         placeholder="f.eks. 75192-1",
-                                         help="Settnummeret til originalsettet som er modifisert")
-            else:
-                base_set = None
-
             col1, col2 = st.columns(2)
             with col1:
-                theme   = st.text_input("Tema", value=prefill.get("theme","") or "")
-                year    = st.number_input("År bygget", min_value=1949, max_value=2030,
-                                          value=date.today().year, step=1)
-                num_parts = st.number_input(
-                    "Antall deler (estimat)",
-                    min_value=0, step=10,
-                    value=int(prefill.get("num_parts") or 0),
-                    help="Kan oppdateres senere",
-                )
+                theme     = st.text_input("Tema", value=prefill.get("theme", "") or "")
+                year      = st.number_input("År bygget", min_value=1949, max_value=2030,
+                                            value=date.today().year, step=1)
+                num_parts = st.number_input("Antall deler (estimat)", min_value=0, step=10,
+                                            value=int(prefill.get("num_parts") or 0))
             with col2:
-                condition = st.selectbox("Tilstand",
-                                         list(CONDITION_LABEL.keys()),
+                condition = st.selectbox("Tilstand", list(CONDITION_LABEL.keys()),
                                          index=list(CONDITION_LABEL.keys()).index("BUILT"),
                                          format_func=lambda x: CONDITION_LABEL[x])
                 notes = st.text_area("Notater", placeholder="Fri tekst ...")
-
-            # Instructions
             st.subheader("📐 Instruksjoner")
-            instructions_url = st.text_input(
-                "Lenke til instruksjoner",
-                value=prefill.get("rebrickable_moc_url","") or "",
-                placeholder="f.eks. https://rebrickable.com/mocs/MOC-12345/",
-            )
-            instructions_file = st.file_uploader(
-                "Last opp instruksjonsfil (PDF, bilde)",
-                type=["pdf","jpg","jpeg","png"],
-                key="moc_instr_file",
-            )
+            instructions_url  = st.text_input("Lenke til instruksjoner",
+                                               value=prefill.get("rebrickable_moc_url", "") or "",
+                                               placeholder="https://rebrickable.com/mocs/MOC-12345/")
+            instructions_file = st.file_uploader("Last opp instruksjonsfil (PDF, bilde)",
+                                                  type=["pdf","jpg","jpeg","png"],
+                                                  key="moc_instr_file")
+            moc_id = prefill.get("moc_id", "") or ""
 
-            moc_id = prefill.get("moc_id","") or ""
-
-            col_back, col_next = st.columns(2)
-            with col_back:
-                if st.button("← Tilbake", use_container_width=True):
-                    st.session_state["reg_input_mode"] = None
-                    st.session_state["moc_prefill"]    = None
-                    st.session_state["moc_rb_results"] = None
+            if st.button("Neste →", use_container_width=True, type="primary"):
+                if not name.strip():
+                    st.error("Navn er påkrevd.")
+                else:
+                    st.session_state["pending_record"] = {
+                        "object_type":        "MOC",
+                        "set_number":         None,
+                        "name":               name.strip(),
+                        "theme":              theme.strip() or None,
+                        "subtheme":           None,
+                        "year":               int(year),
+                        "condition":          condition,
+                        "notes":              notes.strip() or None,
+                        "num_parts":          int(num_parts) if num_parts else None,
+                        "moc_base_set":       None,
+                        "parent_object_id":   None,
+                        "instructions_url":   instructions_url.strip() or None,
+                        "rebrickable_moc_id": moc_id or None,
+                        "_moc_instr_file":    instructions_file,
+                    }
+                    st.session_state["reg_step"] = 3
                     st.rerun()
-            with col_next:
-                if st.button("Neste →", use_container_width=True, type="primary"):
-                    if not name.strip():
-                        st.error("Navn er påkrevd.")
-                    else:
-                        obj_type = "MOD" if is_mod else "MOC"
-                        st.session_state["pending_record"] = {
-                            "object_type":       obj_type,
-                            "set_number":        None,
-                            "name":              name.strip(),
-                            "theme":             theme.strip() or None,
-                            "subtheme":          None,
-                            "year":              int(year),
-                            "condition":         condition,
-                            "notes":             notes.strip() or None,
-                            "num_parts":         int(num_parts) if num_parts else None,
-                            "moc_base_set":      base_set.strip() if base_set else None,
-                            "instructions_url":  instructions_url.strip() or None,
-                            "rebrickable_moc_id": moc_id or None,
-                            "_moc_instr_file":   instructions_file,
-                        }
-                        st.session_state["reg_step"] = 3
+
+        # ── MOD path (modifisert sett) ────────────────────────────────────────
+        elif input_mode == "mod":
+            st.subheader("🔧 MOD – modifisert sett")
+            st.caption("Et offisielt sett du har bygget om eller lagt til noe på")
+            st.divider()
+
+            # Pre-filled parent from "Legg til MOD" button in detail_dialog
+            _prefill_parent_id   = st.session_state.get("reg_mod_parent_id")
+            _prefill_parent_name = st.session_state.get("reg_mod_parent_name")
+
+            st.markdown("**Koble til originalsett (valgfritt)**")
+            link_choice = st.radio(
+                "Koblingstype",
+                ["Fra samlingen min", "Ikke i samlingen (skriv inn nummer)"],
+                index=0 if _prefill_parent_id else 0,
+                horizontal=True,
+                key="mod_link_type",
+            )
+
+            parent_object_id = None
+            moc_base_set     = None
+
+            if link_choice == "Fra samlingen min":
+                if _prefill_parent_id and _prefill_parent_name:
+                    st.success(f"Koblet til: **{_prefill_parent_name}**")
+                    parent_object_id = _prefill_parent_id
+                    if st.button("Endre kobling", key="mod_change_link"):
+                        st.session_state["reg_mod_parent_id"]   = None
+                        st.session_state["reg_mod_parent_name"] = None
                         st.rerun()
+                else:
+                    mod_search = st.text_input("Søk i samlingen",
+                                               placeholder="75192 eller Millennium Falcon",
+                                               key="mod_coll_search")
+                    if mod_search.strip():
+                        all_objs = fetch_objects()
+                        q = mod_search.strip().lower()
+                        matches = [o for o in all_objs
+                                   if o.get("object_type") == "SET"
+                                   and (q in (o.get("name") or "").lower()
+                                        or q in (o.get("set_number") or ""))]
+                        if matches:
+                            chosen = st.selectbox(
+                                "Velg originalsett",
+                                matches,
+                                format_func=lambda o: (
+                                    f"{o.get('set_number','?')} – {display_name(o)}"
+                                ),
+                                key="mod_coll_pick",
+                            )
+                            if chosen:
+                                parent_object_id = chosen.get("id")
+                                st.caption(f"Valgt: {chosen.get('set_number','?')} – {display_name(chosen)}")
+                        elif mod_search:
+                            st.caption("Ingen treff i samlingen.")
+            else:
+                moc_base_set = st.text_input("Settnummer",
+                                             placeholder="f.eks. 75192-1",
+                                             key="mod_base_set_text")
+
+            st.divider()
+            name = st.text_input("Navn på MOD *", placeholder="f.eks. Millennium Falcon med LED")
+            col1, col2 = st.columns(2)
+            with col1:
+                year      = st.number_input("År bygget", min_value=1949, max_value=2030,
+                                            value=date.today().year, step=1)
+                num_parts = st.number_input("Antall deler (estimat)", min_value=0, step=10)
+            with col2:
+                condition = st.selectbox("Tilstand", list(CONDITION_LABEL.keys()),
+                                         index=list(CONDITION_LABEL.keys()).index("BUILT"),
+                                         format_func=lambda x: CONDITION_LABEL[x])
+                notes = st.text_area("Notater", placeholder="Hva er endret / lagt til?")
+
+            instructions_file = st.file_uploader("Instruksjonsfil (valgfritt)",
+                                                  type=["pdf","jpg","jpeg","png"],
+                                                  key="mod_instr_file")
+
+            if st.button("Neste →", use_container_width=True, type="primary"):
+                if not name.strip():
+                    st.error("Navn er påkrevd.")
+                else:
+                    st.session_state["pending_record"] = {
+                        "object_type":        "MOD",
+                        "set_number":         None,
+                        "name":               name.strip(),
+                        "theme":              None,
+                        "subtheme":           None,
+                        "year":               int(year),
+                        "condition":          condition,
+                        "notes":              notes.strip() or None,
+                        "num_parts":          int(num_parts) if num_parts else None,
+                        "moc_base_set":       moc_base_set.strip() if moc_base_set else None,
+                        "parent_object_id":   parent_object_id,
+                        "instructions_url":   None,
+                        "rebrickable_moc_id": None,
+                        "_moc_instr_file":    instructions_file,
+                    }
+                    st.session_state["reg_step"] = 3
+                    st.rerun()
+
+        # ── BULK path ─────────────────────────────────────────────────────────
+        elif input_mode == "bulk":
+            st.subheader("📦 Bulk – blanding")
+            st.caption("En boks, pose eller haug med usortert LEGO")
+            st.divider()
+
+            bulk_name  = st.text_input(
+                "Navn / beskrivelse *",
+                placeholder="f.eks. Finn.no-kjøp mai 2026 eller Kjellerboks #3",
+            )
+            bulk_notes = st.text_area(
+                "Innhold (fritekst)",
+                placeholder="f.eks. Blanding City og Friends, ca 2 kg, inkl. noen minifigs",
+            )
+            bulk_weight = st.number_input("Vekt (kg, valgfritt)", min_value=0.0,
+                                          step=0.1, format="%.1f")
+
+            if st.button("Neste →", use_container_width=True, type="primary"):
+                if not bulk_name.strip():
+                    st.error("Navn er påkrevd.")
+                else:
+                    st.session_state["pending_record"] = {
+                        "object_type":      "BULK",
+                        "set_number":       None,
+                        "name":             bulk_name.strip(),
+                        "theme":            None,
+                        "subtheme":         None,
+                        "year":             date.today().year,
+                        "condition":        "USED",
+                        "notes":            bulk_notes.strip() or None,
+                        "num_parts":        None,
+                        "weight_kg":        float(bulk_weight) if bulk_weight else None,
+                        "parent_object_id": None,
+                    }
+                    st.session_state["reg_step"] = 3
+                    st.rerun()
+
+        # ── PART path (løse deler) ────────────────────────────────────────────
+        elif input_mode == "part":
+            st.subheader("🧩 Løs del")
+            st.caption("Registrer én del-type med farge og antall")
+            st.divider()
+
+            # Pre-selected part from photo flow
+            part_result = st.session_state.get("reg_part_result")
+
+            if part_result:
+                st.success(f"**{part_result.get('name','')}** — `{part_result.get('part_num','')}`")
+                if part_result.get("part_img_url"):
+                    st.image(part_result["part_img_url"], width=120)
+                if st.button("Søk etter en annen del", key="part_reset_search"):
+                    st.session_state["reg_part_result"] = None
+                    st.rerun()
+            else:
+                part_query = st.text_input(
+                    "Delnummer eller beskrivelse",
+                    placeholder="3001  —  eller  —  2x4 brick",
+                    key="part_search_input",
+                )
+                if st.button("🔍 Søk", key="part_search_btn",
+                             type="primary", disabled=not part_query.strip()):
+                    with st.spinner("Søker i Rebrickable ..."):
+                        results = rb_search_parts(part_query.strip(), page_size=12)
+                    st.session_state["reg_part_search_results"] = results
+                    st.rerun()
+
+                search_results = st.session_state.get("reg_part_search_results") or []
+                if search_results:
+                    st.caption(f"Fant {len(search_results)} treff — velg riktig del:")
+                    cols_per_row = 4
+                    for row_start in range(0, len(search_results), cols_per_row):
+                        row_parts = search_results[row_start:row_start + cols_per_row]
+                        pcols = st.columns(cols_per_row)
+                        for pcol, p in zip(pcols, row_parts):
+                            with pcol:
+                                with st.container(border=True):
+                                    if p.get("part_img_url"):
+                                        st.image(p["part_img_url"], use_container_width=True)
+                                    st.caption(f"**{p.get('name','')}**  \n`{p.get('part_num','')}`")
+                                    if st.button("Velg", key=f"part_pick_{p.get('part_num','')}",
+                                                 use_container_width=True):
+                                        st.session_state["reg_part_result"]         = p
+                                        st.session_state["reg_part_search_results"] = None
+                                        st.rerun()
+                elif st.session_state.get("reg_part_search_results") is not None:
+                    st.caption("Ingen treff — prøv et annet søkeord.")
+
+            # Color and quantity — shown when part is selected
+            if part_result:
+                st.divider()
+                all_colors = rb_fetch_colors()
+                if all_colors:
+                    color_choice = st.selectbox(
+                        "Farge",
+                        all_colors,
+                        format_func=lambda c: c.get("name", "?"),
+                        key="part_color_pick",
+                    )
+                    _rgb = color_choice.get("rgb", "cccccc") if color_choice else "cccccc"
+                    st.markdown(
+                        f"<span style='display:inline-block;width:18px;height:18px;"
+                        f"background:#{_rgb};border:1px solid #ccc;border-radius:3px;"
+                        f"vertical-align:middle;margin-right:6px'></span>"
+                        f"<span style='vertical-align:middle'>{color_choice.get('name','') if color_choice else ''}</span>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    color_choice = None
+                    st.text_input("Farge (fritekst)", key="part_color_text",
+                                  placeholder="f.eks. Red")
+
+                qty = st.number_input("Antall", min_value=1, value=1, step=1, key="part_qty")
+
+                if st.button("Neste →", use_container_width=True, type="primary"):
+                    color_id   = color_choice.get("id")   if color_choice else None
+                    color_name = color_choice.get("name") if color_choice else (
+                        st.session_state.get("part_color_text") or None)
+                    st.session_state["pending_record"] = {
+                        "object_type":      "PART",
+                        "set_number":       part_result.get("part_num"),
+                        "name":             part_result.get("name", ""),
+                        "theme":            None,
+                        "subtheme":         None,
+                        "year":             date.today().year,
+                        "condition":        "USED",
+                        "notes":            None,
+                        "num_parts":        int(qty),
+                        "part_color_id":    color_id,
+                        "part_color_name":  color_name,
+                        "parent_object_id": None,
+                    }
+                    st.session_state["reg_step"] = 3
+                    st.rerun()
 
     # ── STEP 2: Details ───────────────────────────────────────────────────────
     elif step == 2:
@@ -2438,10 +2799,13 @@ with tab_register:
                                         placeholder="f.eks. Kjeller")
         sub_location    = st.text_input("Sub-lokasjon", placeholder="f.eks. Hylle 3")
 
+        # PART/BULK/MOC/MOD skip step 2 → Tilbake goes to step 1
+        _back_to = 1 if st.session_state.get("reg_input_mode") in (
+            "part", "bulk", "moc", "mod") else 2
         col_back, col_next = st.columns(2)
         with col_back:
             if st.button("← Tilbake", use_container_width=True):
-                st.session_state["reg_step"] = 2
+                st.session_state["reg_step"] = _back_to
                 st.rerun()
         with col_next:
             if st.button("Neste →", use_container_width=True, type="primary"):
