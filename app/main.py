@@ -383,17 +383,36 @@ def bl_fetch_part(part_num: str) -> dict | None:
             return None
         cat_id = data.get("category_id")
         cat_name = _bl_category_name(cat_id)[0] if cat_id else None
-        # BL CDN needs a real color_id — use Rebrickable for the image instead
-        # (RB images are colour-neutral renders and more reliable)
+
+        # BL CDN image requires a color_id in the URL.
+        # Fetch the known colors for this part from BL and use the first one.
+        # BL is authoritative — RB is only fallback if BL has no color data.
         img_url = None
         try:
-            r_img = requests.get(
-                f"https://rebrickable.com/api/v3/lego/parts/{part_num}/",
-                headers=RB_HEADERS, timeout=5)
-            if r_img.ok:
-                img_url = r_img.json().get("part_img_url")
+            r_col = requests.get(
+                f"https://api.bricklink.com/api/store/v1/items/PART/{part_num}/colors",
+                auth=_bl_auth(), timeout=6,
+            )
+            if r_col.ok:
+                colors = r_col.json().get("data") or []
+                if colors:
+                    color_id = colors[0].get("color_id", 11)  # 11 = Blue as safe fallback
+                    img_url = (f"https://img.bricklink.com/ItemImage/PN"
+                               f"/{color_id}/{part_num}.png")
         except Exception:
             pass
+
+        # Fallback: Rebrickable image (covers newer parts RB knows about)
+        if not img_url:
+            try:
+                r_rb = requests.get(
+                    f"https://rebrickable.com/api/v3/lego/parts/{part_num}/",
+                    headers=RB_HEADERS, timeout=5)
+                if r_rb.ok:
+                    img_url = r_rb.json().get("part_img_url")
+            except Exception:
+                pass
+
         return {
             "part_num":     part_num,
             "name":         name,
