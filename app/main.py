@@ -129,6 +129,13 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
                             '"year":2017,"wear_level":"NEAR_MINT","wear_note":"Lett støv",'
                             '"part_description":null,"part_search_query":null,"confidence":"high"}\n\n'
                             "Felt-regler:\n"
+                            "KRITISK DISTINKSJON — PART vs MOC:\n"
+                            "- PART = én enkelt støpt LEGO-komponent, uansett hvor kompleks formen er "
+                            "(f.eks. en tilhengerbunn, en minifig-torso, en buet plate, en spesialbrakett, "
+                            "en baseplatte med hjul). Spør deg selv: 'Kom dette ut av én form?' → PART.\n"
+                            "- MOC = noe et menneske har montert av FLERE deler. Ser du skjøter mellom "
+                            "klosser, stud-til-tube-koblinger, eller deler i ulike farger satt sammen? → MOC.\n"
+                            "Tvilstilfelle: velg PART.\n\n"
                             "type_guess: én av SET|MINIFIG|PART|BULK|INSTRUCTION|BOX|GEAR|CATALOG|MOC|OTHER\n"
                             "set_number: tall og bindestrek kun, f.eks. '75192' eller '71011-8', ellers null\n"
                             "part_description: norsk/engelsk beskrivelse av del-type og farge, null hvis ikke PART\n"
@@ -1184,7 +1191,7 @@ def reset_registration():
             "bl_name_secondary",
             # Part flow
             "reg_part_result","reg_part_search_results","reg_part_color_id",
-            "reg_part_color_name","reg_part_qty",
+            "reg_part_color_name","reg_part_qty","reg_part_ai_triggered",
             # Bulk flow
             "reg_bulk_name","reg_bulk_notes","reg_bulk_weight",
             # MOD flow
@@ -2105,6 +2112,18 @@ with tab_register:
                     if st.session_state.get("reg_last_img_file_id") != file_id:
                         st.session_state["reg_last_img_file_id"] = file_id
                         img_bytes = img_file.read()
+                        # Apply EXIF rotation correction immediately so every
+                        # downstream display and AI call sees the right orientation.
+                        try:
+                            from PIL import ImageOps as _IOP
+                            _im = Image.open(io.BytesIO(img_bytes))
+                            _im = _IOP.exif_transpose(_im)
+                            _buf = io.BytesIO()
+                            _fmt = "JPEG" if "jpeg" in img_file.type or "jpg" in img_file.type else "PNG"
+                            _im.convert("RGB").save(_buf, format=_fmt, quality=90)
+                            img_bytes = _buf.getvalue()
+                        except Exception:
+                            pass
                         st.session_state["reg_uploaded_img_bytes"] = img_bytes
                         st.session_state["reg_uploaded_img_type"]  = img_file.type
                         with st.spinner("Analyserer bilde ..."):
@@ -2568,27 +2587,26 @@ with tab_register:
                     st.session_state["reg_part_result"] = None
                     st.rerun()
             else:
-                # Show cached image for reference + offer AI identification
-                if _part_cached_img:
-                    c_img, c_tip = st.columns([1, 3])
-                    with c_img:
-                        st.image(_part_cached_img, use_container_width=True)
-                    with c_tip:
-                        st.caption("Bildet ditt er klar. Du kan la AI prøve å identifisere "
-                                   "delen, eller søke manuelt nedenfor.")
-                        if st.button("🤖 Identifiser del fra bilde", key="part_ai_retry",
-                                     type="primary"):
-                            with st.spinner("Analyserer ..."):
-                                ai_r = identify_lego_from_image(
-                                    _part_cached_img, _part_cached_type or "image/jpeg")
-                            if ai_r.get("part_search_query"):
-                                with st.spinner("Søker i Rebrickable ..."):
-                                    candidates = rb_search_parts(
-                                        ai_r["part_search_query"], page_size=12)
-                                st.session_state["reg_part_search_results"] = candidates
-                            else:
-                                st.session_state["reg_part_search_results"] = []
-                            st.rerun()
+                # If there is a cached image and we haven't auto-searched yet,
+                # run AI part identification automatically — no extra button click needed.
+                if (_part_cached_img
+                        and st.session_state.get("reg_part_search_results") is None
+                        and not st.session_state.get("reg_part_ai_triggered")):
+                    st.session_state["reg_part_ai_triggered"] = True
+                    st.image(_part_cached_img, use_container_width=True)
+                    with st.spinner("Identifiserer del fra bilde ..."):
+                        ai_r = identify_lego_from_image(
+                            _part_cached_img, _part_cached_type or "image/jpeg")
+                        query = ai_r.get("part_search_query") or ai_r.get("part_description")
+                        if query:
+                            candidates = rb_search_parts(query, page_size=12)
+                        else:
+                            candidates = []
+                    st.session_state["reg_part_search_results"] = candidates
+                    st.rerun()
+                elif _part_cached_img and st.session_state.get("reg_part_ai_triggered"):
+                    # Show image as reference while user browses results / searches manually
+                    st.image(_part_cached_img, width=120)
 
                 part_query = st.text_input(
                     "Delnummer eller beskrivelse",
