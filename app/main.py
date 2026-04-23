@@ -842,15 +842,36 @@ def rb_search_parts(query: str, page_size: int = 12) -> list:
     Returns list of {part_num, name, part_img_url, part_url}.
     """
     try:
-        r = requests.get(
-            "https://rebrickable.com/api/v3/lego/parts/",
-            headers=RB_HEADERS,
-            params={"search": query, "page_size": page_size},
-            timeout=10,
-        )
-        if not r.ok:
-            return []
-        return r.json().get("results", [])
+        results = []
+        # If query looks like a pure number, try smarter lookups first:
+        # 1) Exact Rebrickable part_num  2) BrickLink ID cross-reference
+        # Both beat a generic text search which matches "817" in "20817" etc.
+        if query.strip().isdigit():
+            pn = query.strip()
+            # 1) Exact part_num lookup
+            r1 = requests.get(f"https://rebrickable.com/api/v3/lego/parts/{pn}/",
+                               headers=RB_HEADERS, timeout=10)
+            if r1.ok:
+                results = [r1.json()]
+
+            # 2) BrickLink ID lookup (RB stores cross-refs from other catalogs)
+            if not results:
+                r2 = requests.get("https://rebrickable.com/api/v3/lego/parts/",
+                                  headers=RB_HEADERS,
+                                  params={"bricklink_id": pn, "page_size": page_size},
+                                  timeout=10)
+                if r2.ok:
+                    results = r2.json().get("results", [])
+
+        # Fall back to text search for non-numeric queries or when above gave nothing
+        if not results:
+            r3 = requests.get("https://rebrickable.com/api/v3/lego/parts/",
+                              headers=RB_HEADERS,
+                              params={"search": query, "page_size": page_size},
+                              timeout=10)
+            if r3.ok:
+                results = r3.json().get("results", [])
+        return results
     except Exception:
         return []
 
@@ -2199,22 +2220,21 @@ with tab_register:
                     candidates = ai_result.get("_part_candidates") or []
                     if candidates:
                         st.caption("Velg riktig del, eller fortsett manuelt:")
-                        cols_per_row = 4
-                        for row_start in range(0, len(candidates), cols_per_row):
-                            row_parts = candidates[row_start:row_start + cols_per_row]
-                            pcols = st.columns(cols_per_row)
-                            for pcol, p in zip(pcols, row_parts):
-                                with pcol:
-                                    with st.container(border=True):
-                                        if p.get("part_img_url"):
-                                            st.image(p["part_img_url"], use_container_width=True)
-                                        st.caption(f"**{p.get('name','')}**  \n`{p.get('part_num','')}`")
-                                        if st.button("Velg", key=f"img_part_{p.get('part_num','')}",
-                                                     use_container_width=True):
-                                            st.session_state["reg_part_result"]   = p
-                                            st.session_state["reg_input_mode"]    = "part"
-                                            st.session_state["reg_ai_result"]     = None
-                                            st.rerun()
+                        for p in candidates:
+                            c_img, c_info, c_btn = st.columns([1, 3, 1])
+                            with c_img:
+                                if p.get("part_img_url"):
+                                    st.image(p["part_img_url"], use_container_width=True)
+                            with c_info:
+                                st.markdown(f"**{p.get('name','')}**")
+                                st.caption(f"`{p.get('part_num','')}`")
+                            with c_btn:
+                                if st.button("Velg", key=f"img_part_{p.get('part_num','')}",
+                                             use_container_width=True):
+                                    st.session_state["reg_part_result"]   = p
+                                    st.session_state["reg_input_mode"]    = "part"
+                                    st.session_state["reg_ai_result"]     = None
+                                    st.rerun()
                     else:
                         st.caption("Ingen treff på delnummer-søk.")
                     if st.button("🧩 Søk etter del manuelt", use_container_width=True):
@@ -2623,21 +2643,20 @@ with tab_register:
                 search_results = st.session_state.get("reg_part_search_results") or []
                 if search_results:
                     st.caption(f"Fant {len(search_results)} treff — velg riktig del:")
-                    cols_per_row = 4
-                    for row_start in range(0, len(search_results), cols_per_row):
-                        row_parts = search_results[row_start:row_start + cols_per_row]
-                        pcols = st.columns(cols_per_row)
-                        for pcol, p in zip(pcols, row_parts):
-                            with pcol:
-                                with st.container(border=True):
-                                    if p.get("part_img_url"):
-                                        st.image(p["part_img_url"], use_container_width=True)
-                                    st.caption(f"**{p.get('name','')}**  \n`{p.get('part_num','')}`")
-                                    if st.button("Velg", key=f"part_pick_{p.get('part_num','')}",
-                                                 use_container_width=True):
-                                        st.session_state["reg_part_result"]         = p
-                                        st.session_state["reg_part_search_results"] = None
-                                        st.rerun()
+                    for p in search_results:
+                        c_img, c_info, c_btn = st.columns([1, 3, 1])
+                        with c_img:
+                            if p.get("part_img_url"):
+                                st.image(p["part_img_url"], use_container_width=True)
+                        with c_info:
+                            st.markdown(f"**{p.get('name','')}**")
+                            st.caption(f"`{p.get('part_num','')}`")
+                        with c_btn:
+                            if st.button("Velg", key=f"part_pick_{p.get('part_num','')}",
+                                         use_container_width=True):
+                                st.session_state["reg_part_result"]         = p
+                                st.session_state["reg_part_search_results"] = None
+                                st.rerun()
                 elif st.session_state.get("reg_part_search_results") is not None:
                     st.caption("Ingen treff — prøv et annet søkeord.")
 
