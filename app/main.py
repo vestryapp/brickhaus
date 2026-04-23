@@ -215,6 +215,33 @@ def _lego_icon_b64(size: int = 40) -> str:
 
 st.set_page_config(page_title="BrickHaus", page_icon=_make_lego_icon(64), layout="wide")
 
+# ── Global CSS tweaks ─────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Tighter top padding — Streamlit default wastes ~4rem */
+.block-container { padding-top: 1.2rem !important; padding-bottom: 1rem !important; }
+
+/* Primary buttons: use brand blue instead of alarming red.
+   Red reads as "danger/cancel" — reserve it for Avbryt only. */
+div.stButton > button[kind="primary"] {
+    background-color: #2E5FA3 !important;
+    border-color:     #2E5FA3 !important;
+    color:            #ffffff !important;
+}
+div.stButton > button[kind="primary"]:hover {
+    background-color: #244d8a !important;
+    border-color:     #244d8a !important;
+}
+
+/* Avbryt-knapp: make it clearly a cancel/danger action */
+div.stButton > button[data-testid*="cancel"],
+div.stButton > button:has-text("Avbryt") {
+    border-color: #cc3333 !important;
+    color:        #cc3333 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -2101,58 +2128,51 @@ with tab_register:
         if input_mode is None:
             st.subheader("Registrer nytt objekt")
 
-            # If user came from photo flow and chose "Velg type manuelt",
-            # the image bytes are still in session state — show a notice so
-            # they know the image is carried forward.
+            # If user came from photo flow and chose manual type selection,
+            # image bytes are still in session state — show compact notice.
             _cached_img = st.session_state.get("reg_uploaded_img_bytes")
             if _cached_img:
-                _ci, _ct = st.columns([1, 4])
+                _ci, _ct = st.columns([1, 5])
                 with _ci:
-                    st.image(_cached_img, width=60)
+                    st.image(_cached_img, width=52)
                 with _ct:
-                    st.caption("📷 Bilde er klar — velger du **Deler**, **Bulk**, **MOC** eller **MOD** "
-                               "blir bildet lagret automatisk med oppføringen.")
+                    st.caption("Bilde klar — velger du Deler, Bulk, MOC eller MOD "
+                               "lagres det automatisk med oppføringen.")
 
-            # Top row: two primary entry points
+            # Top row: two main entry points
             top1, top2 = st.columns(2)
             with top1:
-                if st.button("📷  Gjenkjenn fra foto", use_container_width=True,
+                if st.button("Gjenkjenn fra foto", use_container_width=True,
                              type="primary", disabled=not ANTHROPIC_API_KEY):
                     st.session_state["reg_input_mode"] = "image"
                     st.rerun()
                 st.caption("Alle typer" if ANTHROPIC_API_KEY else "Krever ANTHROPIC_API_KEY")
             with top2:
-                if st.button("🔢  Søk på nummer", use_container_width=True, type="primary"):
+                if st.button("Søk på nummer / navn", use_container_width=True,
+                             type="primary"):
                     st.session_state["reg_input_mode"] = "number"
                     st.rerun()
                 st.caption("Sett, minifig, del")
 
-            st.write("")
-
-            # Bottom row: four manual entry points
+            # Bottom row: four manual entry points (secondary)
             b1, b2, b3, b4 = st.columns(4)
             with b1:
-                if st.button("🧩  Deler", use_container_width=True):
+                if st.button("Løse deler", use_container_width=True):
                     st.session_state["reg_input_mode"] = "part"
                     st.rerun()
-                st.caption("Løse")
             with b2:
-                if st.button("📦  Bulk", use_container_width=True):
+                if st.button("Bulk", use_container_width=True):
                     st.session_state["reg_input_mode"] = "bulk"
                     st.rerun()
-                st.caption("Blanding")
             with b3:
-                if st.button("🏗️  MOC", use_container_width=True):
+                if st.button("MOC", use_container_width=True):
                     st.session_state["reg_input_mode"] = "moc"
                     st.rerun()
-                st.caption("Eget bygg")
             with b4:
-                if st.button("🔧  MOD", use_container_width=True):
+                if st.button("MOD", use_container_width=True):
                     st.session_state["reg_input_mode"] = "mod"
                     st.rerun()
-                st.caption("Modifisert")
 
-            st.divider()
             _progress_indicator(step)
 
         # ── Image path ────────────────────────────────────────────────────────
@@ -2160,13 +2180,13 @@ with tab_register:
             ai_result = st.session_state.get("reg_ai_result")
 
             if ai_result is None:
-                st.subheader("📷 Gjenkjenn fra foto")
-                st.caption("Last opp bilde av hva som helst — sett, minifig, del, bulk, eske …")
+                st.subheader("Gjenkjenn fra foto")
+                st.caption("Sett, minifig, del, bulk, eske — alle typer")
                 img_file = st.file_uploader(
-                    "Velg bilde",
+                    "Ta bilde eller velg fra bibliotek",
                     type=["jpg", "jpeg", "png", "webp"],
                     key="reg_id_img",
-                    label_visibility="collapsed",
+                    help="På mobil: trykk for å ta bilde direkte eller velge fra bildebiblioteket",
                 )
                 if img_file is not None:
                     file_id = getattr(img_file, "file_id", None) or img_file.name
@@ -2308,7 +2328,7 @@ with tab_register:
                     with col_no:
                         # Keep image — route to mode selector, not number path.
                         # Image bytes stay in session state so PART/BULK flows can reuse them.
-                        if st.button("🔢 Velg type manuelt", use_container_width=True):
+                        if st.button("Ingen av disse — velg type", use_container_width=True):
                             st.session_state["reg_ai_result"]  = None
                             st.session_state["reg_input_mode"] = None
                             st.rerun()
@@ -2329,7 +2349,7 @@ with tab_register:
                             st.session_state["reg_input_mode"] = "part"
                             st.rerun()
                     with col_manual:
-                        if st.button("🔢 Velg type manuelt", use_container_width=True):
+                        if st.button("Ingen av disse — velg type", use_container_width=True):
                             st.session_state["reg_ai_result"]  = None
                             st.session_state["reg_input_mode"] = None
                             st.rerun()
@@ -2624,13 +2644,36 @@ with tab_register:
 
         # ── PART path (løse deler) ────────────────────────────────────────────
         elif input_mode == "part":
-            st.subheader("🧩 Løs del")
+            st.subheader("Løs del")
             st.caption("Registrer én del-type med farge og antall")
             st.divider()
 
-            # Carry forward image from photo flow if available
+            # Carry forward image from photo flow, or let user take one now
             _part_cached_img   = st.session_state.get("reg_uploaded_img_bytes")
             _part_cached_type  = st.session_state.get("reg_uploaded_img_type")
+
+            # If no image yet, offer a compact photo option
+            if not _part_cached_img and not st.session_state.get("reg_part_result"):
+                part_img_file = st.file_uploader(
+                    "Ta bilde av delen (valgfritt — brukes til AI-søk)",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="part_direct_img",
+                    help="På mobil: ta bilde direkte eller velg fra bibliotek",
+                )
+                if part_img_file:
+                    raw = part_img_file.read()
+                    try:
+                        from PIL import ImageOps as _IOP2
+                        _im2 = Image.open(io.BytesIO(raw))
+                        _im2 = _IOP2.exif_transpose(_im2)
+                        _buf2 = io.BytesIO()
+                        _im2.convert("RGB").save(_buf2, format="JPEG", quality=90)
+                        raw = _buf2.getvalue()
+                    except Exception:
+                        pass
+                    st.session_state["reg_uploaded_img_bytes"] = raw
+                    st.session_state["reg_uploaded_img_type"]  = part_img_file.type
+                    st.rerun()
 
             # Pre-selected part from photo flow
             part_result = st.session_state.get("reg_part_result")
