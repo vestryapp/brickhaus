@@ -334,6 +334,41 @@ def _fetch_bl_name(item_type: str, item_id: str) -> str | None:
         return None
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def bl_fetch_part(part_num: str) -> dict | None:
+    """
+    Fetch BrickLink catalog metadata for a PART — BL is authoritative.
+    Returns {part_num, name, category, part_img_url} or None.
+    Image URL is constructed from BL's CDN (colour-neutral / colour 0).
+    """
+    if not BL_CONSUMER_KEY or not part_num:
+        return None
+    try:
+        r = requests.get(
+            f"https://api.bricklink.com/api/store/v1/items/PART/{part_num}",
+            auth=_bl_auth(), timeout=8,
+        )
+        if not r.ok:
+            return None
+        data = r.json().get("data") or {}
+        name = html.unescape(data.get("name") or "") or None
+        if not name:
+            return None
+        cat_id = data.get("category_id")
+        cat_name = _bl_category_name(cat_id)[0] if cat_id else None
+        # BrickLink CDN image — color 0 = colour-neutral thumbnail
+        img_url = f"https://img.bricklink.com/ItemImage/PN/0/{part_num}.png"
+        return {
+            "part_num":     part_num,
+            "name":         name,
+            "category":     cat_name,
+            "part_img_url": img_url,
+            "_source":      "bricklink",
+        }
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _bl_category_name(cat_id: int) -> tuple[str | None, int | None]:
     """Return (category_name, parent_id) for a BrickLink category, cached."""
@@ -843,18 +878,23 @@ def rb_search_parts(query: str, page_size: int = 12) -> list:
     """
     try:
         results = []
-        # If query looks like a pure number, try smarter lookups first:
-        # 1) Exact Rebrickable part_num  2) BrickLink ID cross-reference
-        # Both beat a generic text search which matches "817" in "20817" etc.
-        if query.strip().isdigit():
-            pn = query.strip()
-            # 1) Exact part_num lookup
-            r1 = requests.get(f"https://rebrickable.com/api/v3/lego/parts/{pn}/",
-                               headers=RB_HEADERS, timeout=10)
-            if r1.ok:
-                results = [r1.json()]
+        pn = query.strip()
+        is_number = pn.isdigit()
 
-            # 2) BrickLink ID lookup (RB stores cross-refs from other catalogs)
+        if is_number:
+            # ── BrickLink first (authoritative) ──────────────────────────────
+            bl = bl_fetch_part(pn)
+            if bl:
+                results = [bl]
+
+            # ── Rebrickable exact part_num as supplement ──────────────────────
+            if not results:
+                r1 = requests.get(f"https://rebrickable.com/api/v3/lego/parts/{pn}/",
+                                   headers=RB_HEADERS, timeout=10)
+                if r1.ok and r1.json().get("part_num"):
+                    results = [r1.json()]
+
+            # ── Rebrickable bricklink_id cross-reference ──────────────────────
             if not results:
                 r2 = requests.get("https://rebrickable.com/api/v3/lego/parts/",
                                   headers=RB_HEADERS,
@@ -863,7 +903,7 @@ def rb_search_parts(query: str, page_size: int = 12) -> list:
                 if r2.ok:
                     results = r2.json().get("results", [])
 
-        # Fall back to text search for non-numeric queries or when above gave nothing
+        # Text search via Rebrickable (BL has no free-text parts search API)
         if not results:
             r3 = requests.get("https://rebrickable.com/api/v3/lego/parts/",
                               headers=RB_HEADERS,
