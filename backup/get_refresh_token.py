@@ -28,7 +28,7 @@ if not os.path.exists(SECRET_FILE):
     exit(1)
 
 flow = InstalledAppFlow.from_client_secrets_file(SECRET_FILE, SCOPES)
-creds = flow.run_local_server(port=0)
+creds = flow.run_local_server(port=8080, open_browser=True)
 
 print("\n✅ Autentisering vellykket! Kopier disse til Railway-variablene:\n")
 print(f"GOOGLE_CLIENT_ID     = {creds.client_id}")

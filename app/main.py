@@ -45,9 +45,14 @@ def _bl_auth():
 _MAX_IMG_PX = 1024  # resize long edge to this before sending — reduces image tokens ~4–16×
 
 def _resize_image(image_bytes: bytes, content_type: str) -> tuple[bytes, str]:
-    """Resize image so its longest side is at most _MAX_IMG_PX. Returns (bytes, media_type)."""
+    """Resize image so its longest side is at most _MAX_IMG_PX.
+    Also corrects EXIF orientation so mobile photos are right-side up.
+    Returns (bytes, media_type).
+    """
     try:
+        from PIL import ImageOps
         img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img)   # fix mobile rotation (EXIF tag 274)
         img.thumbnail((_MAX_IMG_PX, _MAX_IMG_PX), Image.LANCZOS)
         buf = io.BytesIO()
         fmt = "JPEG" if "jpeg" in content_type or "jpg" in content_type else "PNG"
@@ -2028,6 +2033,18 @@ with tab_register:
         if input_mode is None:
             st.subheader("Registrer nytt objekt")
 
+            # If user came from photo flow and chose "Velg type manuelt",
+            # the image bytes are still in session state — show a notice so
+            # they know the image is carried forward.
+            _cached_img = st.session_state.get("reg_uploaded_img_bytes")
+            if _cached_img:
+                _ci, _ct = st.columns([1, 4])
+                with _ci:
+                    st.image(_cached_img, width=60)
+                with _ct:
+                    st.caption("📷 Bilde er klar — velger du **Deler**, **Bulk**, **MOC** eller **MOD** "
+                               "blir bildet lagret automatisk med oppføringen.")
+
             # Top row: two primary entry points
             top1, top2 = st.columns(2)
             with top1:
@@ -2210,6 +2227,8 @@ with tab_register:
                             st.session_state["reg_ai_result"]  = None
                             st.rerun()
                     with col_no:
+                        # Keep image — route to mode selector, not number path.
+                        # Image bytes stay in session state so PART/BULK flows can reuse them.
                         if st.button("🔢 Velg type manuelt", use_container_width=True):
                             st.session_state["reg_ai_result"]  = None
                             st.session_state["reg_input_mode"] = None
@@ -2223,11 +2242,18 @@ with tab_register:
                     user_bytes = st.session_state.get("reg_uploaded_img_bytes")
                     if user_bytes:
                         st.image(user_bytes, width=200)
-                    if st.button("🔢 Gå til manuelt søk", type="primary",
-                                 use_container_width=True):
-                        st.session_state["reg_ai_result"]  = None
-                        st.session_state["reg_input_mode"] = "number"
-                        st.rerun()
+                    col_part, col_manual = st.columns(2)
+                    with col_part:
+                        if st.button("🧩 Søk etter del", type="primary",
+                                     use_container_width=True):
+                            st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_input_mode"] = "part"
+                            st.rerun()
+                    with col_manual:
+                        if st.button("🔢 Velg type manuelt", use_container_width=True):
+                            st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_input_mode"] = None
+                            st.rerun()
 
             st.divider()
             _progress_indicator(step)
@@ -2523,17 +2549,47 @@ with tab_register:
             st.caption("Registrer én del-type med farge og antall")
             st.divider()
 
+            # Carry forward image from photo flow if available
+            _part_cached_img   = st.session_state.get("reg_uploaded_img_bytes")
+            _part_cached_type  = st.session_state.get("reg_uploaded_img_type")
+
             # Pre-selected part from photo flow
             part_result = st.session_state.get("reg_part_result")
 
             if part_result:
-                st.success(f"**{part_result.get('name','')}** — `{part_result.get('part_num','')}`")
-                if part_result.get("part_img_url"):
-                    st.image(part_result["part_img_url"], width=120)
+                c_img, c_info = st.columns([1, 3])
+                with c_img:
+                    if part_result.get("part_img_url"):
+                        st.image(part_result["part_img_url"], use_container_width=True)
+                with c_info:
+                    st.success(f"**{part_result.get('name','')}**")
+                    st.caption(f"Delnr: `{part_result.get('part_num','')}`")
                 if st.button("Søk etter en annen del", key="part_reset_search"):
                     st.session_state["reg_part_result"] = None
                     st.rerun()
             else:
+                # Show cached image for reference + offer AI identification
+                if _part_cached_img:
+                    c_img, c_tip = st.columns([1, 3])
+                    with c_img:
+                        st.image(_part_cached_img, use_container_width=True)
+                    with c_tip:
+                        st.caption("Bildet ditt er klar. Du kan la AI prøve å identifisere "
+                                   "delen, eller søke manuelt nedenfor.")
+                        if st.button("🤖 Identifiser del fra bilde", key="part_ai_retry",
+                                     type="primary"):
+                            with st.spinner("Analyserer ..."):
+                                ai_r = identify_lego_from_image(
+                                    _part_cached_img, _part_cached_type or "image/jpeg")
+                            if ai_r.get("part_search_query"):
+                                with st.spinner("Søker i Rebrickable ..."):
+                                    candidates = rb_search_parts(
+                                        ai_r["part_search_query"], page_size=12)
+                                st.session_state["reg_part_search_results"] = candidates
+                            else:
+                                st.session_state["reg_part_search_results"] = []
+                            st.rerun()
+
                 part_query = st.text_input(
                     "Delnummer eller beskrivelse",
                     placeholder="3001  —  eller  —  2x4 brick",
