@@ -383,8 +383,17 @@ def bl_fetch_part(part_num: str) -> dict | None:
             return None
         cat_id = data.get("category_id")
         cat_name = _bl_category_name(cat_id)[0] if cat_id else None
-        # BrickLink CDN image — color 0 = colour-neutral thumbnail
-        img_url = f"https://img.bricklink.com/ItemImage/PN/0/{part_num}.png"
+        # BL CDN needs a real color_id — use Rebrickable for the image instead
+        # (RB images are colour-neutral renders and more reliable)
+        img_url = None
+        try:
+            r_img = requests.get(
+                f"https://rebrickable.com/api/v3/lego/parts/{part_num}/",
+                headers=RB_HEADERS, timeout=5)
+            if r_img.ok:
+                img_url = r_img.json().get("part_img_url")
+        except Exception:
+            pass
         return {
             "part_num":     part_num,
             "name":         name,
@@ -1025,7 +1034,20 @@ def get_or_create_location(name: str) -> str:
     return created[0]["id"]
 
 def save_object(record: dict):
-    sb_post("objects", [record])
+    # Columns added in migration_registration_v2.sql.
+    # Strip them if they are None so the INSERT still works if the
+    # migration hasn't been run yet (avoids 400 "column not found").
+    _v2_cols = {"parent_object_id", "weight_kg", "part_color_id", "part_color_name"}
+    clean = {k: v for k, v in record.items() if k not in _v2_cols or v is not None}
+    try:
+        sb_post("objects", [clean])
+    except Exception as e:
+        if "400" in str(e) or "42703" in str(e):
+            # Likely the v2 migration hasn't been applied — retry without new columns
+            fallback = {k: v for k, v in clean.items() if k not in _v2_cols}
+            sb_post("objects", [fallback])
+        else:
+            raise
     st.cache_data.clear()
 
 
@@ -2041,6 +2063,11 @@ with tab_register:
         st.caption(" · ".join(_bits))
 
     def _progress_indicator(step):
+        # Only show for set/number/image flows — not for part/bulk/moc/mod
+        # which have their own simpler single-screen forms.
+        _mode = st.session_state.get("reg_input_mode")
+        if _mode in ("part", "bulk", "moc", "mod"):
+            return
         steps = ["Settnummer", "Detaljer", "Plassering", "Kjøp", "Lagre"]
         cols  = st.columns(len(steps))
         for i, (col, label) in enumerate(zip(cols, steps), start=1):
@@ -2146,13 +2173,13 @@ with tab_register:
                              type="primary", disabled=not ANTHROPIC_API_KEY):
                     st.session_state["reg_input_mode"] = "image"
                     st.rerun()
-                st.caption("Alle typer" if ANTHROPIC_API_KEY else "Krever ANTHROPIC_API_KEY")
+                if not ANTHROPIC_API_KEY:
+                    st.caption("Krever ANTHROPIC_API_KEY")
             with top2:
-                if st.button("Søk på nummer / navn", use_container_width=True,
+                if st.button("Søk på sett / minifig", use_container_width=True,
                              type="primary"):
                     st.session_state["reg_input_mode"] = "number"
                     st.rerun()
-                st.caption("Sett, minifig, del")
 
             # Bottom row: four manual entry points (secondary)
             b1, b2, b3, b4 = st.columns(4)
@@ -2746,7 +2773,9 @@ with tab_register:
             # Color and quantity — shown when part is selected
             if part_result:
                 st.divider()
-                all_colors = rb_fetch_colors()
+                all_colors = [c for c in rb_fetch_colors()
+                              if c.get("id", 0) != 0  # strip [Unknown] (id=0)
+                              and c.get("name", "").strip()]
                 if all_colors:
                     color_choice = st.selectbox(
                         "Farge",
