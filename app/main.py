@@ -1461,6 +1461,24 @@ def init_state():
         "reg_has_original_box": False,
         "reg_completeness":     "UNKNOWN",
         "bl_name_secondary":    None,    # BL official name shown as caption when != name
+        # ── Hurtigscan ────────────────────────────────────────────────────────
+        "hs_screen":          1,        # 1=sesjon, 2=input, 3=id-kort, 4=bekreftelse, 5=søk
+        "hs_loc_level1":      None,     # Sted (obligatorisk)
+        "hs_loc_level2":      None,     # Enhet
+        "hs_loc_level3":      None,     # Posisjon
+        "hs_loc_level4":      None,     # Beholder
+        "hs_img_bytes":       None,
+        "hs_img_type":        None,
+        "hs_ai_result":       None,
+        "hs_set_data":        None,
+        "hs_condition":       "BUILT",
+        "hs_wear_level":      None,
+        "hs_search_query":    None,
+        "hs_search_results":  None,
+        "hs_last_img_id":     None,
+        "hs_last_ownership_id": None,
+        "hs_last_set_name":   None,
+        "hs_last_obj_uuid":   None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2228,7 +2246,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_collection, tab_register = st.tabs(["📦 Samling", "➕ Registrer"])
+tab_collection, tab_register, tab_hurtigscan = st.tabs(["📦 Samling", "➕ Registrer", "⚡ Hurtigscan"])
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2724,7 +2742,7 @@ with tab_register:
                     st.info(f"🧩 AI gjenkjente en del: **{part_desc or 'ukjent type'}**")
                     candidates = ai_result.get("_part_candidates") or []
                     if candidates:
-                        st.caption("Velg riktig del, eller fortsett manuelt:")
+                        st.caption("Velg riktig del, eller søk manuelt:")
                         for p in candidates:
                             c_img, c_info, c_btn = st.columns([1, 3, 1])
                             with c_img:
@@ -2736,16 +2754,40 @@ with tab_register:
                             with c_btn:
                                 if st.button("Velg", key=f"img_part_{p.get('part_num','')}",
                                              use_container_width=True):
+                                    # Carry AI color to part flow
+                                    _ai_col = ai_result.get("part_color_bl")
+                                    if _ai_col:
+                                        st.session_state["reg_part_ai_color"] = _ai_col
                                     st.session_state["reg_part_result"]   = p
                                     st.session_state["reg_input_mode"]    = "part"
+                                    st.session_state["reg_part_ai_triggered"] = True
                                     st.session_state["reg_ai_result"]     = None
                                     st.rerun()
                     else:
-                        st.caption("Ingen treff på delnummer-søk.")
-                    if st.button("🧩 Søk etter del manuelt", use_container_width=True):
-                        st.session_state["reg_input_mode"] = "part"
-                        st.session_state["reg_ai_result"]  = None
-                        st.rerun()
+                        st.caption("Ingen treff på automatisk delsøk.")
+
+                    # Carry AI context (color + query) when going to manual part search
+                    _ai_query = ai_result.get("part_search_query") or ai_result.get("part_description") or ""
+                    _ai_col   = ai_result.get("part_color_bl")
+                    col_manual, col_other = st.columns(2)
+                    with col_manual:
+                        if st.button("🧩 Søk etter del manuelt", use_container_width=True,
+                                     type="primary"):
+                            if _ai_col:
+                                st.session_state["reg_part_ai_color"] = _ai_col
+                            if _ai_query:
+                                st.session_state["part_search_input"] = _ai_query
+                            # Mark AI as done so part flow doesn't re-run it
+                            st.session_state["reg_part_ai_triggered"]    = True
+                            st.session_state["reg_part_search_results"]  = candidates  # [] is fine
+                            st.session_state["reg_input_mode"] = "part"
+                            st.session_state["reg_ai_result"]  = None
+                            st.rerun()
+                    with col_other:
+                        if st.button("Ingen av disse — velg type", use_container_width=True):
+                            st.session_state["reg_ai_result"]  = None
+                            st.session_state["reg_input_mode"] = None
+                            st.rerun()
 
                 # ── Other identified types (BULK, INSTRUCTION, BOX, etc.) ────
                 elif type_guess in ("BULK", "INSTRUCTION", "BOX", "GEAR", "CATALOG", "MOC"):
@@ -3247,7 +3289,7 @@ with tab_register:
                     "Delnummer eller beskrivelse",
                     placeholder="3001  —  eller  —  2x4 brick",
                     key="part_search_input",
-                )
+                ) or ""
                 if st.button("🔍 Søk", key="part_search_btn",
                              type="primary", disabled=not part_query.strip()):
                     with st.spinner("Søker i Rebrickable ..."):
@@ -3690,4 +3732,642 @@ with tab_register:
 
         if st.button("➕ Registrer et til", type="primary", use_container_width=True):
             reset_registration()
+            st.rerun()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB 3: HURTIGSCAN — sesjonbasert rask registrering
+# Maks 4 trykk per sett. Lokasjon settes én gang for hele sesjonen.
+# Skjerm 1: Sesjon + lokasjon
+# Skjerm 2: Input-bar (foto / søk)
+# Skjerm 3: Identifikasjonskortet
+# Skjerm 4: Bekreftelse
+# Skjerm 5: Ikke gjenkjent / manuelt søk
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+with tab_hurtigscan:
+
+    # ── CSS ───────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    .hs-chip {
+        display: inline-block;
+        background: #e8eef7;
+        color: #2E5FA3;
+        border-radius: 16px;
+        padding: 4px 12px;
+        font-size: 0.9rem;
+        margin-right: 4px;
+        margin-bottom: 4px;
+        border: 1px solid #c0d0e8;
+    }
+    .hs-loc-arrow { color: #aaa; margin: 0 4px; font-size: 0.9rem; }
+    .hs-confirm-circle { font-size: 5rem; text-align: center; padding: 1.5rem 0; line-height: 1; }
+    .hs-confirm-name   { font-size: 1.4rem; font-weight: 700; text-align: center; margin: 0.5rem 0; }
+    .hs-confirm-loc    { text-align: center; color: #555; margin-bottom: 0.4rem; }
+    .hs-confirm-id     { text-align: center; font-weight: 600; color: #2E5FA3; font-size: 1.1rem; }
+    .hs-pill { display:inline-block; border-radius:12px; padding:3px 10px; font-size:0.8rem; color:#fff; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Hjelpefunksjoner ──────────────────────────────────────────────────────
+
+    def _hs_loc_str() -> str:
+        """Bygg lokasjonsstreng fra aktive nivåer, f.eks. 'Bod / Hylle B / 3'."""
+        parts = [st.session_state.get(k) for k in
+                 ("hs_loc_level1", "hs_loc_level2", "hs_loc_level3", "hs_loc_level4")]
+        return " / ".join(p for p in parts if p)
+
+    def _hs_loc_chips_html() -> str:
+        """Returner HTML med lokasjons-chips for visning."""
+        parts = [st.session_state.get(k) for k in
+                 ("hs_loc_level1", "hs_loc_level2", "hs_loc_level3", "hs_loc_level4")]
+        parts = [p for p in parts if p]
+        if not parts:
+            return ""
+        bits = []
+        for i, p in enumerate(parts):
+            bits.append(f'<span class="hs-chip">{html.escape(p)}</span>')
+            if i < len(parts) - 1:
+                bits.append('<span class="hs-loc-arrow">›</span>')
+        return " ".join(bits)
+
+    def _hs_clear_scan():
+        """Nullstill kun gjeldende skann — behold sesjon og lokasjon."""
+        for k in ("hs_img_bytes", "hs_img_type", "hs_ai_result", "hs_set_data",
+                  "hs_condition", "hs_wear_level", "hs_search_query",
+                  "hs_search_results", "hs_last_img_id"):
+            st.session_state[k] = None
+        st.session_state["hs_condition"] = "BUILT"
+
+    def _hs_end_session():
+        """Avslutter hele sesjonen og returnerer til skjerm 1."""
+        for k in ("hs_loc_level1", "hs_loc_level2", "hs_loc_level3", "hs_loc_level4",
+                  "hs_img_bytes", "hs_img_type", "hs_ai_result", "hs_set_data",
+                  "hs_condition", "hs_wear_level", "hs_search_query", "hs_search_results",
+                  "hs_last_img_id", "hs_last_ownership_id", "hs_last_set_name",
+                  "hs_last_obj_uuid"):
+            st.session_state[k] = None
+        st.session_state["hs_condition"] = "BUILT"
+        st.session_state["hs_screen"]    = 1
+
+    def _hs_translate_query(query: str) -> str:
+        """Bruk Claude Haiku til å oversette norsk søk til BL/RB-terminologi."""
+        if not ANTHROPIC_API_KEY or _looks_like_set_number(query.strip()):
+            return query
+        try:
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=60,
+                temperature=0,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Oversett dette LEGO-søket til BrickLink/Rebrickable-terminologi på engelsk. "
+                        "Svar KUN med den oversatte søketermen — ingen forklaringer:\n" + query
+                    ),
+                }],
+            )
+            translated = msg.content[0].text.strip().strip('"').strip("'")
+            return translated if translated else query
+        except Exception:
+            return query
+
+    def _hs_do_search(raw_query: str) -> list:
+        """Søk på Rebrickable med norsk→engelsk oversettelse."""
+        q = raw_query.strip()
+        if not q:
+            return []
+        q_en = _hs_translate_query(q)
+        if _looks_like_set_number(q_en):
+            results = rb_search_variants(q_en.split("-")[0])
+            if not results:
+                results = rb_name_search(q_en, limit=12)
+        else:
+            results = rb_name_search(q_en, limit=12)
+            if not results and q_en != q:
+                results = rb_name_search(q, limit=12)
+        return results or []
+
+    def _hs_build_set_data(rb_data: dict, obj_type: str = "SET") -> dict:
+        """Bygg set_data-dict fra Rebrickable + BrickLink overlay."""
+        sn = rb_data.get("set_num", "")
+        bl_meta = bl_fetch_set_metadata(sn)
+        sd = {
+            "set_num":        sn,
+            "name":           rb_data.get("name"),
+            "year":           rb_data.get("year"),
+            "num_parts":      rb_data.get("num_parts"),
+            "set_img_url":    rb_data.get("set_img_url"),
+            "_theme_name":    rb_data.get("_theme_name", ""),
+            "_subtheme_name": rb_data.get("_subtheme_name", ""),
+            "_obj_type":      obj_type,
+        }
+        if bl_meta:
+            sd["theme"]    = bl_meta.get("theme") or sd["_theme_name"]
+            sd["subtheme"] = bl_meta.get("subtheme") or sd["_subtheme_name"]
+            sd["year"]     = bl_meta.get("year") or sd["year"]
+            if bl_meta.get("name"):
+                sd["name_bl"] = bl_meta["name"]
+        return sd
+
+    def _hs_save_and_confirm(set_data: dict, condition: str, wear_level: str | None,
+                              img_bytes: bytes | None, img_type: str | None):
+        """Lagre sett i DB, lagre bilde, gå til bekreftelse-skjerm."""
+        loc_str = _hs_loc_str()
+        loc_id  = get_or_create_location(loc_str) if loc_str else None
+
+        sn       = set_data.get("set_num") or ""
+        obj_type = set_data.get("_obj_type", "SET")
+        name     = set_data.get("name") or sn
+
+        bl_price, bl_name = None, None
+        if sn and obj_type in ("SET", "MINIFIG"):
+            bl_price, bl_name = bl_get_price(
+                sn, condition, obj_type, name)
+
+        ownership_id = next_ownership_id()
+        record = {
+            "user_id":            _current_user.id,
+            "ownership_id":       ownership_id,
+            "status":             "OWNED",
+            "object_type":        obj_type,
+            "set_number":         sn,
+            "name":               name,
+            "theme":              set_data.get("theme") or set_data.get("_theme_name"),
+            "subtheme":           set_data.get("subtheme") or set_data.get("_subtheme_name"),
+            "year":               set_data.get("year"),
+            "num_parts":          set_data.get("num_parts"),
+            "condition":          condition,
+            "wear_level":         wear_level,
+            "location_id":        loc_id,
+            "registered_at":      str(date.today()),
+            "quality_level":      "BASIC",
+            "estimated_value_bl": bl_price,
+            "name_bl":            bl_name,
+        }
+        save_object(record)
+
+        # Hent UUID for bildebinding
+        obj_uuid = None
+        try:
+            rows = sb_get("objects", {"ownership_id": f"eq.{ownership_id}", "select": "id"})
+            obj_uuid = rows[0]["id"] if rows else None
+        except Exception:
+            pass
+
+        # Auto-lagre bilde
+        if img_bytes and obj_uuid:
+            try:
+                save_documentation_image(
+                    obj_uuid, ownership_id,
+                    img_bytes, img_type or "image/jpeg")
+            except Exception:
+                pass
+
+        st.session_state["hs_last_ownership_id"] = ownership_id
+        st.session_state["hs_last_set_name"]     = name
+        st.session_state["hs_last_obj_uuid"]     = obj_uuid
+        st.session_state["hs_screen"]            = 4
+
+    # ── Hent gjeldende skjerm ────────────────────────────────────────────────
+    hs_screen = st.session_state.get("hs_screen") or 1
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SKJERM 1: Sesjon + lokasjon
+    # ─────────────────────────────────────────────────────────────────────────
+    if hs_screen == 1:
+        st.subheader("⚡ Hurtigscan")
+        st.caption("Lokasjonen du velger gjelder for alle sett du registrerer i denne sesjonen.")
+        st.divider()
+
+        st.markdown("#### Velg lokasjon")
+
+        col_l1, col_l2 = st.columns(2)
+        with col_l1:
+            v1 = st.text_input(
+                "Sted \\*",
+                value=st.session_state.get("hs_loc_level1") or "",
+                placeholder="Bod, Stue, Kontor …",
+                key="hs_l1_inp",
+            )
+            st.session_state["hs_loc_level1"] = v1.strip() or None
+        with col_l2:
+            v2 = st.text_input(
+                "Enhet",
+                value=st.session_state.get("hs_loc_level2") or "",
+                placeholder="Hylle A, Vitrineskap …",
+                key="hs_l2_inp",
+            )
+            st.session_state["hs_loc_level2"] = v2.strip() or None
+
+        col_l3, col_l4 = st.columns(2)
+        with col_l3:
+            v3 = st.text_input(
+                "Posisjon",
+                value=st.session_state.get("hs_loc_level3") or "",
+                placeholder="1, 2, Rad 2 …",
+                key="hs_l3_inp",
+            )
+            st.session_state["hs_loc_level3"] = v3.strip() or None
+        with col_l4:
+            v4 = st.text_input(
+                "Beholder",
+                value=st.session_state.get("hs_loc_level4") or "",
+                placeholder="Eske A, Pose 3 …",
+                key="hs_l4_inp",
+            )
+            st.session_state["hs_loc_level4"] = v4.strip() or None
+
+        chips = _hs_loc_chips_html()
+        if chips:
+            st.markdown("**Lokasjon:**")
+            st.markdown(chips, unsafe_allow_html=True)
+
+        st.markdown("")
+
+        has_sted = bool(st.session_state.get("hs_loc_level1"))
+        if st.button("Start registrering", type="primary",
+                     use_container_width=True, disabled=not has_sted):
+            st.session_state["hs_screen"] = 2
+            st.rerun()
+
+        if not has_sted:
+            st.caption("⚠️ Sted er obligatorisk for å starte sesjonen.")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SKJERM 2: Input-bar — foto eller søk
+    # ─────────────────────────────────────────────────────────────────────────
+    elif hs_screen == 2:
+
+        # ── Lokasjon-header med chips + Endre + Avslutt ───────────────────
+        hdr_loc, hdr_chg, hdr_end = st.columns([5, 1, 1])
+        with hdr_loc:
+            chips = _hs_loc_chips_html()
+            if chips:
+                st.markdown(chips, unsafe_allow_html=True)
+        with hdr_chg:
+            if st.button("Endre", key="hs_chg_loc", help="Endre lokasjon"):
+                st.session_state["hs_screen"] = 1
+                st.rerun()
+        with hdr_end:
+            if st.button("Avslutt", key="hs_end_btn"):
+                _hs_end_session()
+                st.rerun()
+
+        st.divider()
+
+        # ── Bilde-opplasting ──────────────────────────────────────────────
+        st.markdown("#### 📷 Skann sett")
+        img_file = st.file_uploader(
+            "Ta bilde eller velg fra bibliotek",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="hs_img_uploader",
+            help="På mobil: trykk for å ta bilde direkte. Desktop: dra og slipp eller velg fil.",
+        )
+
+        if img_file is not None:
+            file_id = getattr(img_file, "file_id", None) or img_file.name
+            if st.session_state.get("hs_last_img_id") != file_id:
+                st.session_state["hs_last_img_id"] = file_id
+
+                # EXIF-korreksjon
+                img_bytes = img_file.read()
+                try:
+                    from PIL import ImageOps as _IOP2
+                    _im2 = Image.open(io.BytesIO(img_bytes))
+                    _im2 = _IOP2.exif_transpose(_im2)
+                    _buf2 = io.BytesIO()
+                    _fmt2 = ("JPEG" if "jpeg" in img_file.type or "jpg" in img_file.type
+                             else "PNG")
+                    _im2.convert("RGB").save(_buf2, format=_fmt2, quality=90)
+                    img_bytes = _buf2.getvalue()
+                except Exception:
+                    pass
+
+                st.session_state["hs_img_bytes"] = img_bytes
+                st.session_state["hs_img_type"]  = img_file.type
+
+                with st.spinner("Analyserer bilde …"):
+                    ai = identify_lego_from_image(img_bytes, img_file.type)
+                st.session_state["hs_ai_result"] = ai
+
+                wear = ai.get("wear_level")
+                if wear in WEAR_LABEL:
+                    st.session_state["hs_wear_level"] = wear
+
+                sn   = ai.get("set_number")
+                conf = ai.get("confidence", "low")
+                typ  = ai.get("type_guess", "OTHER")
+
+                if typ in ("SET", "MINIFIG") and sn and conf in ("high", "medium"):
+                    # Prøv å hente settinfo fra RB + BL
+                    with st.spinner("Henter settinfo …"):
+                        try:
+                            base = sn.split("-")[0]
+                            variants = rb_search_variants(base)
+                            if variants:
+                                match = next(
+                                    (v for v in variants if v.get("set_num") == sn),
+                                    variants[0])
+                                rb_data = rb_lookup(match.get("set_num", sn))
+                                if rb_data:
+                                    sd = _hs_build_set_data(rb_data, typ)
+                                    st.session_state["hs_set_data"]  = sd
+                                    st.session_state["hs_condition"] = "BUILT"
+                                    st.session_state["hs_screen"]    = 3
+                                    st.rerun()
+                        except Exception:
+                            pass
+
+                # Fant ikke → skjerm 5 (manuelt søk)
+                if st.session_state.get("hs_screen") != 3:
+                    st.session_state["hs_search_results"] = None
+                    st.session_state["hs_search_query"]   = None
+                    st.session_state["hs_screen"]         = 5
+                    st.rerun()
+
+        # ── Tekst-søk ─────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🔍 Søk på sett")
+
+        s_col, b_col = st.columns([5, 1])
+        with s_col:
+            hs_q = st.text_input(
+                "Søk",
+                placeholder="Settnummer eller navn (norsk støttes) …",
+                key="hs_txt_input",
+                label_visibility="collapsed",
+            )
+        with b_col:
+            do_txt = st.button("Søk", key="hs_txt_btn", type="primary",
+                               use_container_width=True)
+
+        if do_txt and hs_q.strip():
+            with st.spinner("Søker …"):
+                results = _hs_do_search(hs_q)
+            st.session_state["hs_search_results"] = results
+            st.session_state["hs_search_query"]   = hs_q.strip()
+            st.session_state["hs_screen"]          = 5
+            st.rerun()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SKJERM 3: Identifikasjonskortet
+    # ─────────────────────────────────────────────────────────────────────────
+    elif hs_screen == 3:
+        sd        = st.session_state.get("hs_set_data") or {}
+        ai        = st.session_state.get("hs_ai_result") or {}
+        img_bytes = st.session_state.get("hs_img_bytes")
+
+        # ── Lokasjon-chips + Avslutt ──────────────────────────────────────
+        h_loc, h_end = st.columns([6, 1])
+        with h_loc:
+            chips = _hs_loc_chips_html()
+            if chips:
+                st.markdown(chips, unsafe_allow_html=True)
+        with h_end:
+            if st.button("Avslutt", key="hs_end_3"):
+                _hs_end_session()
+                st.rerun()
+
+        st.divider()
+
+        # Bildekvalitet-pill
+        conf       = ai.get("confidence", "medium")
+        conf_label = {"high": "Bildekvalitet: God",
+                      "medium": "Bildekvalitet: Middels",
+                      "low": "Bildekvalitet: Lav"}.get(conf, "Bildekvalitet: Middels")
+        conf_color = {"high": "#2E7D32", "medium": "#E65100",
+                      "low": "#B71C1C"}.get(conf, "#E65100")
+        st.markdown(
+            f'<span class="hs-pill" style="background:{conf_color}">'
+            f'{conf_label}</span>',
+            unsafe_allow_html=True
+        )
+        st.markdown("")
+
+        # ── Side om side: brukers bilde + BL referansebilde ───────────────
+        img_col, ref_col = st.columns(2)
+        with img_col:
+            if img_bytes:
+                st.image(img_bytes, caption="Ditt bilde", use_container_width=True)
+            else:
+                st.markdown("*Ingen bilde*")
+        with ref_col:
+            ref = sd.get("set_img_url")
+            if ref:
+                st.image(ref, caption="Referansebilde", use_container_width=True)
+            else:
+                st.markdown("*Ingen referansebilde*")
+
+        # ── Settinfo ──────────────────────────────────────────────────────
+        sn      = sd.get("set_num") or ""
+        name    = sd.get("name") or "–"
+        name_bl = sd.get("name_bl")
+        theme   = sd.get("theme") or sd.get("_theme_name") or "–"
+        sub     = sd.get("subtheme") or sd.get("_subtheme_name")
+        year    = sd.get("year")
+        nparts  = sd.get("num_parts")
+
+        st.markdown(f"#### {name}")
+        if name_bl and name_bl != name:
+            st.caption(f"BL-navn: {html.escape(str(name_bl))}")
+
+        info_bits = []
+        if sn:     info_bits.append(f"Nr: {sn}")
+        if theme and theme != "–":  info_bits.append(theme)
+        if sub:    info_bits.append(sub)
+        if year:   info_bits.append(str(year))
+        if nparts: info_bits.append(f"{nparts} deler")
+        if info_bits:
+            st.caption(" · ".join(info_bits))
+
+        st.markdown("")
+
+        # ── Tilstand — pill-knapper ───────────────────────────────────────
+        st.markdown("**Tilstand:**")
+        cur_cond = st.session_state.get("hs_condition") or "BUILT"
+        cond_keys = list(CONDITION_LABEL.keys())
+        cond_cols = st.columns(len(cond_keys))
+        for col, ck in zip(cond_cols, cond_keys):
+            # Strip emoji — beholder bare teksten etter første mellomrom
+            label = CONDITION_LABEL[ck]
+            short = label.split(" ", 1)[-1] if " " in label else label
+            with col:
+                if st.button(short, key=f"hs_cond_{ck}",
+                             type="primary" if cur_cond == ck else "secondary",
+                             use_container_width=True):
+                    st.session_state["hs_condition"] = ck
+                    st.rerun()
+
+        # Slitasjevelger vises kun for ikke-forseglede tilstander
+        if cur_cond in _WEAR_RELEVANT_CONDITIONS:
+            st.markdown("**Slitasje:**")
+            cur_wear  = st.session_state.get("hs_wear_level")
+            wear_keys = list(WEAR_LABEL.keys())
+            wear_cols = st.columns(len(wear_keys))
+            for col, wk in zip(wear_cols, wear_keys):
+                wlabel = WEAR_LABEL[wk].split(" ", 1)[-1]
+                with col:
+                    if st.button(wlabel, key=f"hs_wear_{wk}",
+                                 type="primary" if cur_wear == wk else "secondary",
+                                 use_container_width=True):
+                        st.session_state["hs_wear_level"] = wk
+                        st.rerun()
+
+        st.markdown("")
+
+        # ── OK / Korriger ─────────────────────────────────────────────────
+        ok_col, corr_col = st.columns([3, 1])
+        with corr_col:
+            if st.button("Korriger", key="hs_korriger", use_container_width=True):
+                st.session_state["hs_set_data"]      = None
+                st.session_state["hs_search_results"] = None
+                st.session_state["hs_search_query"]   = None
+                st.session_state["hs_screen"]          = 5
+                st.rerun()
+        with ok_col:
+            if st.button("OK →", key="hs_ok", type="primary", use_container_width=True):
+                condition  = st.session_state.get("hs_condition") or "BUILT"
+                wear_level = (st.session_state.get("hs_wear_level")
+                              if condition in _WEAR_RELEVANT_CONDITIONS else None)
+                with st.spinner("Lagrer …"):
+                    try:
+                        _hs_save_and_confirm(
+                            sd, condition, wear_level,
+                            st.session_state.get("hs_img_bytes"),
+                            st.session_state.get("hs_img_type"),
+                        )
+                        st.rerun()
+                    except Exception as _e:
+                        st.error(f"Lagring feilet: {_e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SKJERM 4: Bekreftelse
+    # ─────────────────────────────────────────────────────────────────────────
+    elif hs_screen == 4:
+        ownership_id = st.session_state.get("hs_last_ownership_id", "")
+        set_name     = st.session_state.get("hs_last_set_name", "")
+        loc_str      = _hs_loc_str()
+
+        st.markdown('<div class="hs-confirm-circle">✅</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="hs-confirm-name">{html.escape(set_name)}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="hs-confirm-loc">📍 {html.escape(loc_str)}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="hs-confirm-id">Registrert som {html.escape(ownership_id)}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("")
+
+        nxt_col, end_col = st.columns(2)
+        with nxt_col:
+            if st.button("Registrer neste", type="primary",
+                         use_container_width=True):
+                _hs_clear_scan()
+                st.session_state["hs_last_ownership_id"] = None
+                st.session_state["hs_last_set_name"]     = None
+                st.session_state["hs_last_obj_uuid"]     = None
+                st.session_state["hs_screen"]            = 2
+                st.rerun()
+        with end_col:
+            if st.button("Avslutt", use_container_width=True):
+                _hs_end_session()
+                st.rerun()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SKJERM 5: Ikke gjenkjent / manuelt søk
+    # ─────────────────────────────────────────────────────────────────────────
+    elif hs_screen == 5:
+        img_bytes = st.session_state.get("hs_img_bytes")
+
+        # ── Lokasjon-chips + Avslutt ──────────────────────────────────────
+        h_loc5, h_end5 = st.columns([6, 1])
+        with h_loc5:
+            chips = _hs_loc_chips_html()
+            if chips:
+                st.markdown(chips, unsafe_allow_html=True)
+        with h_end5:
+            if st.button("Avslutt", key="hs_end_5"):
+                _hs_end_session()
+                st.rerun()
+
+        st.divider()
+
+        st.markdown("### Søk etter settet")
+        st.caption("Vi kan ikke identifisere settet fra bildet. "
+                   "Skriv inn settnummer eller søkeord — norsk støttes.")
+
+        if img_bytes:
+            st.image(img_bytes, width=100, caption="Opplastet bilde")
+
+        s2_col, b2_col = st.columns([5, 1])
+        with s2_col:
+            hs_q2 = st.text_input(
+                "Søk",
+                value=st.session_state.get("hs_search_query") or "",
+                placeholder="Settnummer eller navn (f.eks. 'Ringenes Herre') …",
+                key="hs_manual_input",
+                label_visibility="collapsed",
+            )
+        with b2_col:
+            do_manual = st.button("Søk", key="hs_manual_btn", type="primary",
+                                  use_container_width=True)
+
+        if do_manual and hs_q2.strip():
+            with st.spinner("Søker …"):
+                results = _hs_do_search(hs_q2)
+            st.session_state["hs_search_results"] = results
+            st.session_state["hs_search_query"]   = hs_q2.strip()
+            st.rerun()
+
+        results = st.session_state.get("hs_search_results")
+
+        if results:
+            st.markdown(f"**{len(results)} treff** — velg riktig sett:")
+            for res in results:
+                r_img  = res.get("set_img_url")
+                r_name = res.get("name", "–")
+                r_sn   = res.get("set_num", "")
+                r_year = res.get("year", "")
+
+                ri, rd, rb_btn = st.columns([1, 5, 1])
+                with ri:
+                    if r_img:
+                        st.image(r_img, width=60)
+                    else:
+                        st.markdown("🧱")
+                with rd:
+                    st.markdown(f"**{html.escape(r_name)}**")
+                    st.caption(f"{r_sn}  ·  {r_year}")
+                with rb_btn:
+                    if st.button("Velg", key=f"hs_pick_{r_sn}", use_container_width=True):
+                        with st.spinner("Henter settinfo …"):
+                            rb_data = rb_lookup(r_sn)
+                        if rb_data:
+                            sd = _hs_build_set_data(rb_data, "SET")
+                            st.session_state["hs_set_data"]  = sd
+                            st.session_state["hs_condition"] = "BUILT"
+                            st.session_state["hs_screen"]    = 3
+                            st.rerun()
+                        else:
+                            st.error("Kunne ikke hente settdata. Prøv igjen.")
+                st.divider()
+
+        elif results is not None:
+            # Søk er kjørt, men ingen treff
+            st.warning("Ikke funnet. Dette ble ikke lagret.")
+            st.caption("Prøv et annet søkeord eller settnummer.")
+
+        if st.button("← Tilbake til skanning", key="hs_back_scan"):
+            st.session_state["hs_search_results"] = None
+            st.session_state["hs_search_query"]   = None
+            st.session_state["hs_screen"]         = 2
             st.rerun()
