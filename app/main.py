@@ -988,6 +988,42 @@ def rb_fetch_colors() -> list:
         return []
 
 
+@st.cache_data(ttl=3600)   # delelister endres sjelden — cache 1 t
+def rb_fetch_set_parts(set_number: str) -> list:
+    """Henter alle deler (inkl. reservedeler) for et sett fra Rebrickable.
+    Paginerer automatisk inntil alle deler er hentet.
+    Returnerer liste av dict:
+      {part_num, part_name, part_img_url, color_id, color_name, qty, is_spare}
+    """
+    results = []
+    url = (
+        f"https://rebrickable.com/api/v3/lego/sets/{set_number}/parts/"
+        f"?page_size=500"
+    )
+    try:
+        while url:
+            r = requests.get(url, headers=RB_HEADERS, timeout=20)
+            if not r.ok:
+                break
+            data = r.json()
+            for item in data.get("results", []):
+                part  = item.get("part")  or {}
+                color = item.get("color") or {}
+                results.append({
+                    "part_num":     part.get("part_num", ""),
+                    "part_name":    part.get("name", ""),
+                    "part_img_url": part.get("part_img_url") or "",
+                    "color_id":     color.get("id", 0),
+                    "color_name":   color.get("name", ""),
+                    "qty":          item.get("quantity", 1),
+                    "is_spare":     item.get("is_spare", False),
+                })
+            url = data.get("next")
+    except Exception:
+        pass
+    return results
+
+
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
@@ -1068,6 +1104,113 @@ def save_object(record: dict):
         else:
             raise
     st.cache_data.clear()
+
+
+# ── inventory_parts helpers ───────────────────────────────────────────────────
+
+def fetch_inventory_parts(object_id: str) -> list:
+    """Henter alle inventory_parts-rader for et objekt, sortert på part_num + color_id."""
+    try:
+        return sb_get("inventory_parts", {
+            "object_id": f"eq.{object_id}",
+            "select":    "id,part_num,part_name,part_img_url,color_id,color_name,"
+                         "qty_expected,qty_present,is_spare,used_in_mod",
+            "order":     "is_spare.asc,part_num.asc,color_id.asc",
+        })
+    except Exception:
+        return []
+
+
+def upsert_inventory_parts(object_id: str, parts: list, user_id: str) -> bool:
+    """Populerer inventory_parts fra Rebrickable-data.
+    Bruker ON CONFLICT DO NOTHING for å bevare eksisterende qty_present.
+    parts: liste av dict fra rb_fetch_set_parts().
+    """
+    if not parts:
+        return False
+    rows = [
+        {
+            "object_id":    object_id,
+            "user_id":      user_id,
+            "part_num":     p["part_num"],
+            "color_id":     p["color_id"],
+            "color_name":   p["color_name"],
+            "qty_expected": p["qty"],
+            "qty_present":  0,
+            "is_spare":     p["is_spare"],
+            "part_name":    p["part_name"],
+            "part_img_url": p["part_img_url"],
+        }
+        for p in parts
+        if p.get("part_num")  # hopp over rader uten part_num
+    ]
+    if not rows:
+        return False
+    try:
+        # Batch i 200-raders bolker for å unngå for store payloads
+        BATCH = 200
+        for i in range(0, len(rows), BATCH):
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/inventory_parts",
+                headers={
+                    **SB_HEADERS,
+                    "Prefer": "resolution=ignore-duplicates,return=minimal",
+                },
+                json=rows[i:i + BATCH],
+                timeout=30,
+            )
+            if not r.ok:
+                return False
+        st.cache_data.clear()
+        return True
+    except Exception:
+        return False
+
+
+def update_part_qty(part_id: str, qty_present: int) -> bool:
+    """Oppdaterer qty_present for én inventory_parts-rad."""
+    try:
+        sb_patch("inventory_parts", {"id": f"eq.{part_id}"}, {"qty_present": qty_present})
+        return True
+    except Exception:
+        return False
+
+
+def calc_and_save_completeness(object_id: str) -> float:
+    """Beregner kompletthetsgrad (0–1) basert på ikke-reservedeler,
+    og skriver tilbake completeness_level til objects-tabellen.
+    Returnerer andelen som float (0.0–1.0).
+    """
+    try:
+        rows = sb_get("inventory_parts", {
+            "object_id": f"eq.{object_id}",
+            "is_spare":  "eq.false",
+            "select":    "qty_expected,qty_present",
+        })
+    except Exception:
+        return 0.0
+
+    total_exp     = sum(r["qty_expected"] for r in rows)
+    total_present = sum(r["qty_present"]  for r in rows)
+
+    pct = (total_present / total_exp) if total_exp > 0 else 0.0
+
+    if pct >= 1.0:
+        level = "COMPLETE"
+    elif pct >= 0.95:
+        level = "NEARLY_COMPLETE"
+    elif pct > 0.0:
+        level = "INCOMPLETE"
+    else:
+        level = "UNKNOWN"
+
+    try:
+        sb_patch("objects", {"id": f"eq.{object_id}"}, {"completeness_level": level})
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+    return pct
 
 
 # ── Supabase Storage helpers ──────────────────────────────────────────────────
@@ -1293,6 +1436,9 @@ def init_state():
         "moc_rb_results":    None,
         "last_shown_oid":    None,
         "pending_edit_oid":  None,
+        "show_parts_for_oid": None,  # ownership_id of SET whose parts-dialog is open
+        "parts_page":         0,     # current pagination page in parts_dialog
+        "parts_force_refetch": False, # set to True to re-fetch from Rebrickable
         "reg_uploaded_img_bytes": None,  # cached bytes from AI flow, reused as documentation
         "reg_uploaded_img_type":  None,
         "reg_doc_img_saved":  False,     # tracks whether documentation image was saved in step 5
@@ -1456,7 +1602,7 @@ def detail_dialog(obj: dict, loc_list: list):
     st.divider()
     _is_set = obj.get("object_type") == "SET"
     if _is_set:
-        col_edit, col_mod, col_close = st.columns([2, 2, 1])
+        col_edit, col_parts, col_mod, col_close = st.columns([2, 2, 2, 1])
     else:
         col_edit, col_close = st.columns([2, 1])
     with col_edit:
@@ -1466,6 +1612,13 @@ def detail_dialog(obj: dict, loc_list: list):
             st.session_state["last_shown_oid"]   = None
             st.rerun()
     if _is_set:
+        with col_parts:
+            if st.button("📋 Deleliste", use_container_width=True,
+                         key=f"detail_parts_{oid}"):
+                st.session_state["show_parts_for_oid"] = oid
+                st.session_state["last_shown_oid"]     = None
+                st.session_state["parts_page"]         = 0
+                st.rerun()
         with col_mod:
             if st.button("🔧 Legg til MOD", use_container_width=True,
                          key=f"detail_add_mod_{oid}"):
@@ -1481,6 +1634,233 @@ def detail_dialog(obj: dict, loc_list: list):
         if st.button("Lukk", use_container_width=True, key=f"detail_close_{oid}"):
             st.session_state["last_shown_oid"] = None
             st.rerun()
+
+
+@st.dialog("Deleliste", width="large")
+def parts_dialog(obj: dict):
+    """Viser og lar brukeren oppdatere delelisten for et SET-objekt.
+    Henter deler fra Rebrickable første gang; bevarer qty_present ved re-henting.
+    """
+    obj_uuid   = obj["id"]
+    set_number = obj.get("set_number") or "?"
+    oid        = obj.get("ownership_id", "")
+    compact_id, _ = fmt_bh_id(oid)
+    user_id    = st.session_state["user"].id
+
+    st.markdown(
+        f"### 📋 {html.escape(display_name(obj) or set_number)}"
+        f"<span style='color:#888;font-size:0.75em;font-weight:normal'>"
+        f"  {compact_id} · {set_number}</span>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Re-hent fra Rebrickable (trigges av ↻-knapp) ───────────────────────
+    if st.session_state.get("parts_force_refetch"):
+        st.session_state["parts_force_refetch"] = False
+        rb_fetch_set_parts.clear()
+        with st.spinner(f"Henter oppdatert deleliste for {set_number} ..."):
+            raw = rb_fetch_set_parts(set_number)
+        if raw:
+            with st.spinner("Oppdaterer database ..."):
+                upsert_inventory_parts(obj_uuid, raw, user_id)
+            st.success(f"✅ Deleliste oppdatert – {len(raw)} deler.")
+            st.rerun()
+        else:
+            st.warning("Fant ingen deler på Rebrickable.")
+
+    # ── Hent deleliste fra DB ───────────────────────────────────────────────
+    parts = fetch_inventory_parts(obj_uuid)
+
+    if not parts:
+        # Første gang — ingen deleliste i DB ennå
+        st.info(
+            f"Ingen deleliste er lastet for **{set_number}** ennå. "
+            f"Trykk under for å hente fra Rebrickable."
+        )
+        if st.button(
+            f"⬇️ Hent deleliste fra Rebrickable",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner(f"Henter deler for {set_number} ..."):
+                raw = rb_fetch_set_parts(set_number)
+            if raw:
+                with st.spinner("Lagrer til database ..."):
+                    ok = upsert_inventory_parts(obj_uuid, raw, user_id)
+                if ok:
+                    st.success(f"✅ {len(raw)} deler hentet og lagret.")
+                    st.rerun()
+                else:
+                    st.error("Feil ved lagring. Prøv igjen.")
+            else:
+                st.warning(
+                    f"Fant ingen deler for {set_number} på Rebrickable. "
+                    f"Sjekk at settnummeret inkluderer variant (f.eks. 75192-1)."
+                )
+        st.divider()
+        if st.button("Lukk", key="parts_close_empty"):
+            st.session_state["show_parts_for_oid"] = None
+            st.session_state["parts_page"] = 0
+            st.rerun()
+        return
+
+    # ── Del deler i vanlige og reservedeler ────────────────────────────────
+    regular = [p for p in parts if not p["is_spare"]]
+    spares  = [p for p in parts if p["is_spare"]]
+
+    total_exp     = sum(p["qty_expected"] for p in regular)
+    total_present = sum(p["qty_present"]  for p in regular)
+    pct = total_present / total_exp if total_exp > 0 else 0.0
+
+    # ── Fremdriftsmåler ────────────────────────────────────────────────────
+    pct_str = f"{pct * 100:.1f}%"
+    st.markdown(
+        f"**{total_present} / {total_exp} deler til stede &nbsp;·&nbsp; {pct_str} komplett**",
+        unsafe_allow_html=True,
+    )
+    st.progress(pct)
+
+    # ── Kontroller: filter + søk + re-hent ────────────────────────────────
+    ctrl1, ctrl2, ctrl3 = st.columns([2, 3, 1])
+    with ctrl1:
+        filter_mode = st.selectbox(
+            "Vis",
+            ["Alle", "Mangler", "Komplette", "Reservedeler"],
+            key="parts_filter",
+            label_visibility="collapsed",
+        )
+    with ctrl2:
+        search_q = st.text_input(
+            "Søk",
+            placeholder="Del-nr eller navn ...",
+            key="parts_search",
+            label_visibility="collapsed",
+        )
+    with ctrl3:
+        if st.button("↻", help="Re-hent komplett liste fra Rebrickable (bevarer antall)"):
+            st.session_state["parts_force_refetch"] = True
+            st.rerun()
+
+    st.divider()
+
+    # ── Bygg filtert liste ─────────────────────────────────────────────────
+    if filter_mode == "Mangler":
+        display_parts = [p for p in regular if p["qty_present"] < p["qty_expected"]]
+    elif filter_mode == "Komplette":
+        display_parts = [p for p in regular if p["qty_present"] >= p["qty_expected"]]
+    elif filter_mode == "Reservedeler":
+        display_parts = spares
+    else:
+        display_parts = regular
+
+    if search_q:
+        q = search_q.strip().lower()
+        display_parts = [
+            p for p in display_parts
+            if q in (p.get("part_num") or "").lower()
+            or q in (p.get("part_name") or "").lower()
+        ]
+
+    # ── Paginering ─────────────────────────────────────────────────────────
+    PAGE_SIZE   = 50
+    page        = st.session_state.get("parts_page", 0)
+    total_pages = max(1, (len(display_parts) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page        = min(page, total_pages - 1)
+    page_parts  = display_parts[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+    if not display_parts:
+        st.info("Ingen deler matcher filteret.")
+    else:
+        # Tabell-header
+        h1, h2, h3, h4, h5 = st.columns([1, 4, 3, 1, 2])
+        with h1: st.caption("Bilde")
+        with h2: st.caption("Del / navn")
+        with h3: st.caption("Farge")
+        with h4: st.caption("Exp")
+        with h5: st.caption("Har")
+
+        completeness_dirty = False
+
+        for p in page_parts:
+            c1, c2, c3, c4, c5 = st.columns([1, 4, 3, 1, 2])
+            with c1:
+                img = p.get("part_img_url")
+                if img:
+                    st.image(img, width=36)
+                else:
+                    st.write("🧱")
+            with c2:
+                st.caption(p.get("part_num", ""))
+                name_str = (p.get("part_name") or "–").strip()
+                st.markdown(
+                    f"<span style='font-size:0.8em'>{html.escape(name_str)}</span>",
+                    unsafe_allow_html=True,
+                )
+            with c3:
+                st.caption(p.get("color_name", "") or "–")
+            with c4:
+                st.caption(str(p["qty_expected"]))
+            with c5:
+                key = f"qty_{p['id']}"
+                new_qty = st.number_input(
+                    "Har",
+                    min_value=0,
+                    max_value=max(p["qty_expected"], p.get("qty_present", 0)),
+                    value=p["qty_present"],
+                    step=1,
+                    key=key,
+                    label_visibility="collapsed",
+                )
+                if new_qty != p["qty_present"]:
+                    update_part_qty(p["id"], new_qty)
+                    completeness_dirty = True
+
+        if completeness_dirty:
+            calc_and_save_completeness(obj_uuid)
+            st.rerun()
+
+        # Paginering-kontroller
+        if total_pages > 1:
+            pc1, pc2, pc3 = st.columns([1, 3, 1])
+            with pc1:
+                if page > 0 and st.button("← Forrige", key="parts_prev"):
+                    st.session_state["parts_page"] = page - 1
+                    st.rerun()
+            with pc2:
+                st.caption(
+                    f"Side {page + 1} av {total_pages} "
+                    f"({len(display_parts)} deler vist)"
+                )
+            with pc3:
+                if page < total_pages - 1 and st.button("Neste →", key="parts_next"):
+                    st.session_state["parts_page"] = page + 1
+                    st.rerun()
+
+    # ── Reservedeler (kun i "Alle"-modus) ──────────────────────────────────
+    if filter_mode == "Alle" and spares:
+        with st.expander(
+            f"🔩 Reservedeler ({len(spares)}) — teller ikke med i kompletthetsgrad"
+        ):
+            for p in spares:
+                sc1, sc2, sc3 = st.columns([1, 5, 3])
+                with sc1:
+                    if p.get("part_img_url"):
+                        st.image(p["part_img_url"], width=28)
+                    else:
+                        st.write("🧱")
+                with sc2:
+                    st.caption(
+                        f"{p.get('part_num','')} – "
+                        f"{(p.get('part_name') or '–').strip()}"
+                    )
+                with sc3:
+                    st.caption(f"{p.get('color_name','') or '–'} · {p.get('qty_expected',0)} stk")
+
+    st.divider()
+    if st.button("Lukk", key="parts_close", use_container_width=False):
+        st.session_state["show_parts_for_oid"] = None
+        st.session_state["parts_page"] = 0
+        st.rerun()
 
 
 @st.dialog("Rediger objekt", width="large")
@@ -1997,6 +2377,9 @@ with tab_collection:
                     st.session_state["pending_edit_oid"] = None
                     st.session_state["last_shown_oid"]   = _oid
                     edit_dialog(obj, loc_list)
+                elif st.session_state.get("show_parts_for_oid") == _oid:
+                    st.session_state["last_shown_oid"] = _oid
+                    parts_dialog(obj)
                 elif st.session_state.get("last_shown_oid") != _oid:
                     st.session_state["last_shown_oid"] = _oid
                     detail_dialog(obj, loc_list)
@@ -2055,6 +2438,9 @@ with tab_collection:
                             st.session_state["pending_edit_oid"] = None
                             st.session_state["last_shown_oid"]   = _oid
                             edit_dialog(obj, loc_list)
+                        elif st.session_state.get("show_parts_for_oid") == _oid:
+                            st.session_state["last_shown_oid"] = _oid
+                            parts_dialog(obj)
                         elif st.session_state.get("last_shown_oid") != _oid:
                             st.session_state["last_shown_oid"] = _oid
                             detail_dialog(obj, loc_list)
