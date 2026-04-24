@@ -2475,6 +2475,33 @@ with tab_register:
             st.caption("Registrer noe du har bygget selv")
             st.divider()
 
+            # ── Foto (valgfritt) ──────────────────────────────────────────────
+            _moc_cached_img  = st.session_state.get("reg_uploaded_img_bytes")
+            _moc_cached_type = st.session_state.get("reg_uploaded_img_type")
+            if _moc_cached_img:
+                st.image(_moc_cached_img, width=120, caption="Bilde fra foto-flyten")
+            else:
+                _moc_img_file = st.file_uploader(
+                    "Ta bilde av MOC-en (valgfritt)",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="moc_direct_img",
+                    help="På mobil: ta bilde direkte eller velg fra bibliotek",
+                )
+                if _moc_img_file:
+                    _moc_raw = _moc_img_file.read()
+                    try:
+                        from PIL import ImageOps as _IOP_M
+                        _moc_im = Image.open(io.BytesIO(_moc_raw))
+                        _moc_im = _IOP_M.exif_transpose(_moc_im)
+                        _moc_buf = io.BytesIO()
+                        _moc_im.convert("RGB").save(_moc_buf, format="JPEG", quality=90)
+                        _moc_raw = _moc_buf.getvalue()
+                    except Exception:
+                        pass
+                    st.session_state["reg_uploaded_img_bytes"] = _moc_raw
+                    st.session_state["reg_uploaded_img_type"]  = "image/jpeg"
+                    st.rerun()
+
             with st.expander("🔍 Finn i Rebrickable MOC-katalog (valgfritt)"):
                 moc_query = st.text_input("Søk etter MOC-navn eller MOC-ID",
                                           placeholder="f.eks. 'Sopwith Camel' eller 'MOC-12345'",
@@ -2556,6 +2583,33 @@ with tab_register:
             st.subheader("🔧 MOD – modifisert sett")
             st.caption("Et offisielt sett du har bygget om eller lagt til noe på")
             st.divider()
+
+            # ── Foto (valgfritt) ──────────────────────────────────────────────
+            _mod_cached_img  = st.session_state.get("reg_uploaded_img_bytes")
+            _mod_cached_type = st.session_state.get("reg_uploaded_img_type")
+            if _mod_cached_img:
+                st.image(_mod_cached_img, width=120, caption="Bilde fra foto-flyten")
+            else:
+                _mod_img_file = st.file_uploader(
+                    "Ta bilde av MOD-en (valgfritt)",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="mod_direct_img",
+                    help="På mobil: ta bilde direkte eller velg fra bibliotek",
+                )
+                if _mod_img_file:
+                    _mod_raw = _mod_img_file.read()
+                    try:
+                        from PIL import ImageOps as _IOP_D
+                        _mod_im = Image.open(io.BytesIO(_mod_raw))
+                        _mod_im = _IOP_D.exif_transpose(_mod_im)
+                        _mod_buf = io.BytesIO()
+                        _mod_im.convert("RGB").save(_mod_buf, format="JPEG", quality=90)
+                        _mod_raw = _mod_buf.getvalue()
+                    except Exception:
+                        pass
+                    st.session_state["reg_uploaded_img_bytes"] = _mod_raw
+                    st.session_state["reg_uploaded_img_type"]  = "image/jpeg"
+                    st.rerun()
 
             # Pre-filled parent from "Legg til MOD" button in detail_dialog
             _prefill_parent_id   = st.session_state.get("reg_mod_parent_id")
@@ -2656,6 +2710,33 @@ with tab_register:
             st.subheader("📦 Bulk – blanding")
             st.caption("En boks, pose eller haug med usortert LEGO")
             st.divider()
+
+            # ── Foto (valgfritt) ──────────────────────────────────────────────
+            _bulk_cached_img  = st.session_state.get("reg_uploaded_img_bytes")
+            _bulk_cached_type = st.session_state.get("reg_uploaded_img_type")
+            if _bulk_cached_img:
+                st.image(_bulk_cached_img, width=120, caption="Bilde fra foto-flyten")
+            else:
+                _bulk_img_file = st.file_uploader(
+                    "Ta bilde (valgfritt)",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="bulk_direct_img",
+                    help="På mobil: ta bilde direkte eller velg fra bibliotek",
+                )
+                if _bulk_img_file:
+                    _bulk_raw = _bulk_img_file.read()
+                    try:
+                        from PIL import ImageOps as _IOP_B
+                        _bulk_im = Image.open(io.BytesIO(_bulk_raw))
+                        _bulk_im = _IOP_B.exif_transpose(_bulk_im)
+                        _bulk_buf = io.BytesIO()
+                        _bulk_im.convert("RGB").save(_bulk_buf, format="JPEG", quality=90)
+                        _bulk_raw = _bulk_buf.getvalue()
+                    except Exception:
+                        pass
+                    st.session_state["reg_uploaded_img_bytes"] = _bulk_raw
+                    st.session_state["reg_uploaded_img_type"]  = "image/jpeg"
+                    st.rerun()
 
             bulk_name  = st.text_input(
                 "Navn / beskrivelse *",
