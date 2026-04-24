@@ -127,7 +127,8 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
                             "Svar KUN med JSON, ingen annen tekst:\n"
                             '{"type_guess":"SET","set_number":"75192","name":"Millennium Falcon",'
                             '"year":2017,"wear_level":"NEAR_MINT","wear_note":"Lett støv",'
-                            '"part_description":null,"part_search_query":null,"confidence":"high"}\n\n'
+                            '"part_description":null,"part_search_query":null,'
+                            '"part_color_bl":null,"confidence":"high"}\n\n'
                             "Felt-regler:\n"
                             "KRITISK DISTINKSJON — PART vs MOC:\n"
                             "- PART = én enkelt støpt LEGO-komponent, uansett hvor kompleks formen er "
@@ -140,6 +141,9 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
                             "set_number: tall og bindestrek kun, f.eks. '75192' eller '71011-8', ellers null\n"
                             "part_description: norsk/engelsk beskrivelse av del-type og farge, null hvis ikke PART\n"
                             "part_search_query: 2-4 ord egnet for søk i Rebrickable (engelsk), null hvis ikke PART\n"
+                            "part_color_bl: Rebrickable/BrickLink fargenavn på engelsk for PART, f.eks. "
+                            "'Trans-Clear', 'Red', 'Dark Bluish Gray', 'White', 'Yellow' — null hvis ikke PART "
+                            "eller fargen ikke kan identifiseres sikkert\n"
                             "confidence: 'high' hvis sikker, 'medium' hvis noenlunde, 'low' hvis usikker\n"
                             "wear_level: MINT|NEAR_MINT|VERY_GOOD|GOOD|FAIR eller null\n"
                             "wear_note: maks 60 tegn norsk eller null"
@@ -163,18 +167,20 @@ def identify_lego_from_image(image_bytes: bytes, content_type: str) -> dict:
             "wear_note":         result.get("wear_note"),
             "part_description":  result.get("part_description"),
             "part_search_query": result.get("part_search_query"),
+            "part_color_bl":     result.get("part_color_bl"),
             "confidence":        result.get("confidence", "low"),
             "note":              "",
         }
     except json.JSONDecodeError:
         return {"type_guess": "OTHER", "set_number": None, "name": None, "year": None,
                 "wear_level": None, "wear_note": None, "part_description": None,
-                "part_search_query": None, "confidence": "low",
+                "part_search_query": None, "part_color_bl": None, "confidence": "low",
                 "note": "Kunne ikke tolke svar fra AI."}
     except Exception as e:
         return {"type_guess": "OTHER", "set_number": None, "name": None, "year": None,
                 "wear_level": None, "wear_note": None, "part_description": None,
-                "part_search_query": None, "confidence": "low", "note": f"Feil: {e}"}
+                "part_search_query": None, "part_color_bl": None, "confidence": "low",
+                "note": f"Feil: {e}"}
 
 SB_HEADERS = {
     "apikey":        SUPABASE_KEY,
@@ -326,7 +332,13 @@ def sb_post(table, data):
         headers={**SB_HEADERS, "Prefer": "return=representation"},
         data=json.dumps(data, default=str),
     )
-    r.raise_for_status()
+    if not r.ok:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise requests.exceptions.HTTPError(
+            f"{r.status_code} {r.reason} — {detail}", response=r)
     return r.json()
 
 def sb_patch(table, filters: dict, data: dict):
@@ -1466,7 +1478,8 @@ def reset_registration():
             "bl_name_secondary",
             # Part flow
             "reg_part_result","reg_part_search_results","reg_part_color_id",
-            "reg_part_color_name","reg_part_qty","reg_part_ai_triggered",
+            "reg_part_color_name","reg_part_qty","reg_part_ai_triggered","reg_part_ai_color",
+            "part_search_input",
             # Bulk flow
             "reg_bulk_name","reg_bulk_notes","reg_bulk_weight",
             # MOD flow
@@ -3214,7 +3227,13 @@ with tab_register:
                         ai_r = identify_lego_from_image(
                             _part_cached_img, _part_cached_type or "image/jpeg")
                         query = ai_r.get("part_search_query") or ai_r.get("part_description")
+                        # Store AI color guess for pre-filling the color picker
+                        ai_color = ai_r.get("part_color_bl")
+                        if ai_color:
+                            st.session_state["reg_part_ai_color"] = ai_color
+                        # Pre-fill search input with AI query so user can refine if needed
                         if query:
+                            st.session_state["part_search_input"] = query
                             candidates = rb_search_parts(query, page_size=12)
                         else:
                             candidates = []
@@ -3259,16 +3278,32 @@ with tab_register:
             # Color and quantity — shown when part is selected
             if part_result:
                 st.divider()
-                all_colors = [c for c in rb_fetch_colors()
-                              if c.get("id", 0) != 0  # strip [Unknown] (id=0)
-                              and c.get("name", "").strip()]
+                all_colors = sorted(
+                    [c for c in rb_fetch_colors()
+                     if c.get("id", 0) != 0  # strip [Unknown] (id=0)
+                     and c.get("name", "").strip()],
+                    key=lambda c: c.get("name", "").lower()
+                )
                 if all_colors:
+                    # Pre-select color based on AI suggestion (fuzzy match on name)
+                    _ai_color_hint = st.session_state.get("reg_part_ai_color", "")
+                    _default_color_idx = 0
+                    if _ai_color_hint:
+                        _hint_lower = _ai_color_hint.lower()
+                        for _ci, _col in enumerate(all_colors):
+                            _col_lower = _col.get("name", "").lower()
+                            if _hint_lower == _col_lower or _hint_lower in _col_lower or _col_lower in _hint_lower:
+                                _default_color_idx = _ci
+                                break
                     color_choice = st.selectbox(
                         "Farge",
                         all_colors,
+                        index=_default_color_idx,
                         format_func=lambda c: c.get("name", "?"),
                         key="part_color_pick",
                     )
+                    if _ai_color_hint and _default_color_idx > 0:
+                        st.caption(f"💡 AI-forslag: **{_ai_color_hint}** (verifiser selv)")
                     _rgb = color_choice.get("rgb", "cccccc") if color_choice else "cccccc"
                     st.markdown(
                         f"<span style='display:inline-block;width:18px;height:18px;"
@@ -3567,6 +3602,7 @@ with tab_register:
                 ownership_id = next_ownership_id()
                 record = {
                     **rec,
+                    "user_id":            st.session_state["user"].id,
                     "ownership_id":       ownership_id,
                     "status":             "OWNED",
                     "location_id":        loc_id,
