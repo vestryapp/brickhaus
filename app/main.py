@@ -1093,11 +1093,17 @@ def next_ownership_id():
     num = int(last_id.split("-")[1]) + 1
     return f"BH-{num:07d}"
 
-def get_or_create_location(name: str) -> str:
-    existing = sb_get("locations", {"name": f"eq.{name}", "select": "id"})
+def get_or_create_location(name: str, user_id: str | None = None) -> str:
+    query = {"name": f"eq.{name}", "select": "id"}
+    if user_id:
+        query["user_id"] = f"eq.{user_id}"
+    existing = sb_get("locations", query)
     if existing:
         return existing[0]["id"]
-    created = sb_post("locations", [{"name": name}])
+    payload: dict = {"name": name}
+    if user_id:
+        payload["user_id"] = user_id
+    created = sb_post("locations", [payload])
     return created[0]["id"]
 
 def save_object(record: dict):
@@ -2123,7 +2129,7 @@ def edit_dialog(obj: dict, loc_list: list):
                 st.error("Navn er påkrevd.")
                 return
             loc_name_used = new_loc.strip() or (location if location != "– Ingen –" else None)
-            loc_id = get_or_create_location(loc_name_used) if loc_name_used else None
+            loc_id = get_or_create_location(loc_name_used, user_id=_current_user.id) if loc_name_used else None
             price     = float(purchase_price) if purchase_price else None
             total_nok = price if (price and purchase_currency == "NOK") else obj.get("total_cost_nok")
             new_sn = set_number_edit.strip()
@@ -3635,7 +3641,7 @@ with tab_register:
             with st.spinner("Lagrer ..."):
                 loc_name      = rec.pop("_loc_name", None)
                 instr_file    = rec.pop("_moc_instr_file", None)
-                loc_id        = get_or_create_location(loc_name) if loc_name else None
+                loc_id        = get_or_create_location(loc_name, user_id=_current_user.id) if loc_name else None
 
                 bl_price, bl_name = None, None
                 if rec.get("set_number") and rec.get("object_type") in ("SET", "MINIFIG"):
@@ -3772,6 +3778,42 @@ with tab_hurtigscan:
 
     # ── Hjelpefunksjoner ──────────────────────────────────────────────────────
 
+    def _hs_fetch_loc_suggestions() -> dict[int, list[str]]:
+        """Hent distinkte lokasjonskomponenter per nivå fra brukerens eksisterende lokasjoner."""
+        try:
+            rows = sb_get("locations", {"user_id": f"eq.{_current_user.id}", "select": "name"})
+            names = [r["name"] for r in rows if r.get("name")]
+        except Exception:
+            return {1: [], 2: [], 3: [], 4: []}
+        by_level: dict[int, set] = {1: set(), 2: set(), 3: set(), 4: set()}
+        for name in names:
+            parts = [p.strip() for p in name.split("/")]
+            for i, p in enumerate(parts[:4], 1):
+                if p:
+                    by_level[i].add(p)
+        return {k: sorted(v) for k, v in by_level.items()}
+
+    def _hs_loc_combo(label: str, level: int, key_sel: str, key_inp: str,
+                      suggestions: list[str], placeholder: str) -> str | None:
+        """Komboboks for lokasjonsnivå: selectbox med hint + fritekst for nytt nivå."""
+        NEW_SENTINEL = "✏️  Skriv ny verdi..."
+        if suggestions:
+            opts = [""] + suggestions + [NEW_SENTINEL]
+            # Sett default til gjeldende session-verdi om mulig
+            cur = st.session_state.get(f"hs_loc_level{level}") or ""
+            default_idx = opts.index(cur) if cur in opts else 0
+            sel = st.selectbox(label, opts, index=default_idx, key=key_sel,
+                               label_visibility="visible")
+            if sel == NEW_SENTINEL:
+                val = st.text_input(f"Nytt {label.lower().rstrip(' *')}",
+                                    placeholder=placeholder, key=key_inp)
+                return val.strip() or None
+            return sel or None
+        else:
+            val = st.text_input(label, placeholder=placeholder, key=key_inp,
+                                value=st.session_state.get(f"hs_loc_level{level}") or "")
+            return val.strip() or None
+
     def _hs_loc_str() -> str:
         """Bygg lokasjonsstreng fra aktive nivåer, f.eks. 'Bod / Hylle B / 3'."""
         parts = [st.session_state.get(k) for k in
@@ -3876,7 +3918,7 @@ with tab_hurtigscan:
                               img_bytes: bytes | None, img_type: str | None):
         """Lagre sett i DB, lagre bilde, gå til bekreftelse-skjerm."""
         loc_str = _hs_loc_str()
-        loc_id  = get_or_create_location(loc_str) if loc_str else None
+        loc_id  = get_or_create_location(loc_str, user_id=_current_user.id) if loc_str else None
 
         sn       = set_data.get("set_num") or ""
         obj_type = set_data.get("_obj_type", "SET")
@@ -3944,41 +3986,27 @@ with tab_hurtigscan:
 
         st.markdown("#### Velg lokasjon")
 
+        _loc_sugg = _hs_fetch_loc_suggestions()
+
         col_l1, col_l2 = st.columns(2)
         with col_l1:
-            v1 = st.text_input(
-                "Sted \\*",
-                value=st.session_state.get("hs_loc_level1") or "",
-                placeholder="Bod, Stue, Kontor …",
-                key="hs_l1_inp",
-            )
-            st.session_state["hs_loc_level1"] = v1.strip() or None
+            st.session_state["hs_loc_level1"] = _hs_loc_combo(
+                "Sted *", 1, "hs_l1_sel", "hs_l1_inp",
+                _loc_sugg[1], "Bod, Stue, Kontor …")
         with col_l2:
-            v2 = st.text_input(
-                "Enhet",
-                value=st.session_state.get("hs_loc_level2") or "",
-                placeholder="Hylle A, Vitrineskap …",
-                key="hs_l2_inp",
-            )
-            st.session_state["hs_loc_level2"] = v2.strip() or None
+            st.session_state["hs_loc_level2"] = _hs_loc_combo(
+                "Enhet", 2, "hs_l2_sel", "hs_l2_inp",
+                _loc_sugg[2], "Hylle A, Vitrineskap …")
 
         col_l3, col_l4 = st.columns(2)
         with col_l3:
-            v3 = st.text_input(
-                "Posisjon",
-                value=st.session_state.get("hs_loc_level3") or "",
-                placeholder="1, 2, Rad 2 …",
-                key="hs_l3_inp",
-            )
-            st.session_state["hs_loc_level3"] = v3.strip() or None
+            st.session_state["hs_loc_level3"] = _hs_loc_combo(
+                "Posisjon", 3, "hs_l3_sel", "hs_l3_inp",
+                _loc_sugg[3], "1, 2, Rad 2 …")
         with col_l4:
-            v4 = st.text_input(
-                "Beholder",
-                value=st.session_state.get("hs_loc_level4") or "",
-                placeholder="Eske A, Pose 3 …",
-                key="hs_l4_inp",
-            )
-            st.session_state["hs_loc_level4"] = v4.strip() or None
+            st.session_state["hs_loc_level4"] = _hs_loc_combo(
+                "Beholder", 4, "hs_l4_sel", "hs_l4_inp",
+                _loc_sugg[4], "Eske A, Pose 3 …")
 
         chips = _hs_loc_chips_html()
         if chips:
@@ -4185,36 +4213,39 @@ with tab_hurtigscan:
 
         st.markdown("")
 
-        # ── Tilstand — pill-knapper ───────────────────────────────────────
-        st.markdown("**Tilstand:**")
-        cur_cond = st.session_state.get("hs_condition") or "BUILT"
+        # ── Tilstand + Slitasje — kompakte rullegardinmenyer ─────────────
         cond_keys = list(CONDITION_LABEL.keys())
-        cond_cols = st.columns(len(cond_keys))
-        for col, ck in zip(cond_cols, cond_keys):
-            # Strip emoji — beholder bare teksten etter første mellomrom
-            label = CONDITION_LABEL[ck]
-            short = label.split(" ", 1)[-1] if " " in label else label
-            with col:
-                if st.button(short, key=f"hs_cond_{ck}",
-                             type="primary" if cur_cond == ck else "secondary",
-                             use_container_width=True):
-                    st.session_state["hs_condition"] = ck
-                    st.rerun()
+        cur_cond  = st.session_state.get("hs_condition") or "BUILT"
+        cur_idx   = cond_keys.index(cur_cond) if cur_cond in cond_keys else 2
 
-        # Slitasjevelger vises kun for ikke-forseglede tilstander
-        if cur_cond in _WEAR_RELEVANT_CONDITIONS:
-            st.markdown("**Slitasje:**")
-            cur_wear  = st.session_state.get("hs_wear_level")
-            wear_keys = list(WEAR_LABEL.keys())
-            wear_cols = st.columns(len(wear_keys))
-            for col, wk in zip(wear_cols, wear_keys):
-                wlabel = WEAR_LABEL[wk].split(" ", 1)[-1]
-                with col:
-                    if st.button(wlabel, key=f"hs_wear_{wk}",
-                                 type="primary" if cur_wear == wk else "secondary",
-                                 use_container_width=True):
-                        st.session_state["hs_wear_level"] = wk
-                        st.rerun()
+        wear_keys = list(WEAR_LABEL.keys())
+        cur_wear  = st.session_state.get("hs_wear_level") or wear_keys[0]
+        wear_idx  = wear_keys.index(cur_wear) if cur_wear in wear_keys else 0
+
+        cw_col, ww_col = st.columns(2)
+        with cw_col:
+            selected_cond = st.selectbox(
+                "Tilstand",
+                cond_keys,
+                index=cur_idx,
+                format_func=lambda x: CONDITION_LABEL[x].split(" ", 1)[-1],
+                key="hs_cond_sel",
+            )
+            st.session_state["hs_condition"] = selected_cond
+
+        with ww_col:
+            if selected_cond in _WEAR_RELEVANT_CONDITIONS:
+                selected_wear = st.selectbox(
+                    "Slitasje",
+                    wear_keys,
+                    index=wear_idx,
+                    format_func=lambda x: WEAR_LABEL[x].split(" ", 1)[-1],
+                    key="hs_wear_sel",
+                )
+                st.session_state["hs_wear_level"] = selected_wear
+            else:
+                st.selectbox("Slitasje", ["–"], disabled=True, key="hs_wear_sel_off")
+                st.session_state["hs_wear_level"] = None
 
         st.markdown("")
 
